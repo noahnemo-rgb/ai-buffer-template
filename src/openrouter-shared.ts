@@ -14,4 +14,15 @@ export interface OpenRouterStreamOptions {
   timeoutSignal?: AbortSignal;
   onChunk?: (text: string) => void;
   fetchImpl?: typeof fetch;
+  /** Extra JSON fields, such as Space Bunny Alpha's reasoning effort. */
+  extra?: Record<string, unknown>;
+}
+
+export function openRouterRequestBody(options: OpenRouterStreamOptions): string {
+  return JSON.stringify({
+    model: options.model,
+    messages: options.messages,
+    stream: true,
+    ...options.extra,
+  });
 }

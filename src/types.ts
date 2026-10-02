@@ -35,7 +35,7 @@ export interface AiProviderInfo {
 }
 
 export interface AiClient {
-  readonly id: "puter" | "openrouter";
+  readonly id: "puter" | "openrouter" | "space-bunny";
   getInfo(): Promise<AiProviderInfo>;
   /** Present when the provider has its own sign-in. Puter does. OpenRouter does not. */
   signIn?(): Promise<void>;

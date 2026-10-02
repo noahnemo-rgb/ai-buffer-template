@@ -1,4 +1,5 @@
 import io
+import json
 import sys
 import unittest
 import urllib.error
@@ -6,13 +7,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ai_buffer import build_messages, drain_openrouter_sse, stream_openrouter
+from ai_buffer import SPACE_BUNNY_MODEL, build_messages, drain_openrouter_sse, stream_openrouter, stream_space_bunny
 from ai_buffer.messages import DEFAULT_SYSTEM_PROMPT
 
 
 def event(content: str) -> str:
-    import json
-
     return f"data: {json.dumps({'choices': [{'delta': {'content': content}}]})}\n"
 
 
@@ -103,6 +102,26 @@ class StreamTests(unittest.TestCase):
                     open_stream=opener,
                 )
             )
+
+    def test_space_bunny_sends_the_stealth_model(self) -> None:
+        seen: dict[str, object] = {}
+
+        def opener(url: str, payload: bytes, headers: dict[str, str], timeout_sec: float) -> _FakeBody:
+            seen["payload"] = json.loads(payload.decode("utf-8"))
+            return _FakeBody([event("bunny").encode(), b"data: [DONE]\n"])
+
+        chunks = list(
+            stream_space_bunny(
+                api_key="sk-test",
+                messages=[{"role": "user", "content": "Hi"}],
+                open_stream=opener,
+            )
+        )
+        self.assertEqual(chunks, ["bunny"])
+        payload = seen["payload"]
+        assert isinstance(payload, dict)
+        self.assertEqual(payload["model"], SPACE_BUNNY_MODEL)
+        self.assertEqual(payload["reasoning"], {"effort": "medium"})
 
     def test_missing_key(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "OPENROUTER_API_KEY"):
