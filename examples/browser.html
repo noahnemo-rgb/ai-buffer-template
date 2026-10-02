@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ai-buffer Puter example</title>
+  </head>
+  <body>
+    <p>This page is a reference. Install the package, then use the same calls from your app.</p>
+    <script src="https://js.puter.com/v2/"></script>
+    <script type="module">
+      import { createAiClient } from "ai-buffer";
+
+      const ai = createAiClient({ provider: "puter" });
+
+      const reply = await ai.streamChat({
+        message: "Say hello in one sentence.",
+        systemPrompt: "You are a friendly guide.",
+        onChunk: (text) => console.log(text),
+      });
+      console.log(reply);
+    </script>
+  </body>
+</html>
