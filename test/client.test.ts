@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createAiClient } from "../src/client.ts";
+import { AiBufferError } from "../src/errors.ts";
 import { OPENROUTER_URL } from "../src/openrouter-shared.ts";
 import { createMemoryStore, createOpenRouterKeyStore } from "../src/store.ts";
 import type { PuterLike } from "../src/types.ts";
@@ -73,7 +74,8 @@ describe("OpenRouter client", () => {
     assert.equal(info.configured, false);
     await assert.rejects(
       () => client.streamChat({ message: "Hi" }),
-      /OpenRouter API key is not set/,
+      (error: unknown) =>
+        error instanceof AiBufferError && error.code === "missing_key" && /OpenRouter API key is not set/.test(error.message),
     );
   });
 
@@ -83,7 +85,23 @@ describe("OpenRouter client", () => {
       getApiKey: () => "sk-test",
       fetchImpl: async () => sseResponse("slow down", 429),
     });
-    await assert.rejects(() => client.streamChat({ message: "Hi" }), /Too many AI requests/);
+    await assert.rejects(
+      () => client.streamChat({ message: "Hi" }),
+      (error: unknown) => error instanceof AiBufferError && error.code === "rate_limited",
+    );
+  });
+
+  it("turns an HTTP 402 into a payment error", async () => {
+    const client = createAiClient({
+      provider: "openrouter",
+      getApiKey: () => "sk-test",
+      fetchImpl: async () => sseResponse("no credits", 402),
+    });
+    await assert.rejects(
+      () => client.streamChat({ message: "Hi" }),
+      (error: unknown) =>
+        error instanceof AiBufferError && error.code === "payment_required" && /allowance is exhausted/.test(error.message),
+    );
   });
 
   it("stops when the caller aborts", async () => {
@@ -100,7 +118,20 @@ describe("OpenRouter client", () => {
     });
     await assert.rejects(
       () => client.streamChat({ message: "Hi", signal: controller.signal }),
-      (error: unknown) => error instanceof Error && error.name === "AbortError",
+      (error: unknown) => error instanceof AiBufferError && error.code === "cancelled" && /cancelled/.test(error.message),
+    );
+  });
+
+  it("stops a stalled request when the time limit fires", async () => {
+    const client = createAiClient({
+      provider: "openrouter",
+      getApiKey: () => "sk-test",
+      timeoutMs: 30,
+      fetchImpl: () => new Promise(() => undefined),
+    });
+    await assert.rejects(
+      () => client.streamChat({ message: "Hi" }),
+      (error: unknown) => error instanceof AiBufferError && error.code === "cancelled" && /timed out/.test(error.message),
     );
   });
 
@@ -204,6 +235,57 @@ describe("Puter client", () => {
       }),
     });
     assert.equal(await client.streamChat({ message: "Hi" }), "Done");
+  });
+
+  it("asks the user to sign in before calling Puter", async () => {
+    let called = false;
+    const client = createAiClient({
+      provider: "puter",
+      loadPuter: async () => ({
+        auth: { isSignedIn: () => false },
+        ai: {
+          chat: async () => {
+            called = true;
+            return { message: { content: "nope" } };
+          },
+        },
+      }),
+    });
+    await assert.rejects(
+      () => client.streamChat({ message: "Hi" }),
+      (error: unknown) => error instanceof AiBufferError && error.code === "signed_out",
+    );
+    assert.equal(called, false);
+  });
+
+  it("stops reading Puter when the caller cancels", async () => {
+    const controller = new AbortController();
+    const chunks: string[] = [];
+    async function* stream() {
+      yield { type: "text", text: "A" };
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      yield { type: "text", text: "B" };
+    }
+    const client = createAiClient({
+      provider: "puter",
+      loadPuter: async () => ({
+        auth: { isSignedIn: () => true },
+        ai: { chat: async () => stream() },
+      }),
+    });
+    await assert.rejects(
+      () =>
+        client.streamChat({
+          message: "Hi",
+          signal: controller.signal,
+          onChunk: (text) => {
+            chunks.push(text);
+            controller.abort();
+          },
+        }),
+      (error: unknown) => error instanceof AiBufferError && error.code === "cancelled",
+    );
+    assert.deepEqual(chunks, ["A"]);
   });
 
   it("says Puter is unavailable when the loader fails", async () => {

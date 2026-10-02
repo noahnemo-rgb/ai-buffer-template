@@ -30,31 +30,16 @@ A single HTML page can load Puter from `https://js.puter.com/v2/` instead. The a
 
 Python apps do not use npm. Add this repo's `python/` directory to `PYTHONPATH`, then `import ai_buffer`.
 
-## Browser (Puter)
+## Expo website and phone
 
-```ts
-import { createAiClient } from "ai-buffer";
+Use one import. The website build talks to Puter. The iPhone and Android build talks to OpenRouter and shows tokens as they arrive.
 
-const ai = createAiClient({ provider: "puter" });
-
-await ai.signIn?.();
-
-const reply = await ai.streamChat({
-  message: "Give me three dinner ideas.",
-  systemPrompt: "You plan simple meals from what is already in the kitchen.",
-  onChunk: (text) => appendToScreen(text),
-});
-```
-
-`systemPrompt` belongs to that app. A joke app, a coding app, and a meal app each pass their own text.
-
-## Phone (OpenRouter key on the device)
-
-The key stays in the phone's secure store. It is sent only to OpenRouter.
+`puterModel` and `openrouterModel` are separate. A model that works on the website can be a different id from the model on the phone.
 
 ```ts
 import * as SecureStore from "expo-secure-store";
-import { createAiClient, createOpenRouterKeyStore, formatCodeContext } from "ai-buffer";
+import { createChatSession, createOpenRouterKeyStore } from "ai-buffer";
+import { createExpoClient, expoPlatform } from "ai-buffer/expo";
 
 const secrets = createOpenRouterKeyStore({
   get: (key) => SecureStore.getItemAsync(key),
@@ -62,26 +47,78 @@ const secrets = createOpenRouterKeyStore({
   delete: (key) => SecureStore.deleteItemAsync(key),
 });
 
-const ai = createAiClient({
-  provider: "openrouter",
-  transport: "xhr",
+const ai = createExpoClient({
+  puterModel: "openai/gpt-4o-mini",
+  openrouterModel: "openai/gpt-4o-mini",
   getApiKey: () => secrets.getKey(),
-  getModel: () => secrets.getModel(),
+  getOpenRouterModel: () => secrets.getModel(),
   appName: "Syntax Mobile IDE",
   siteUrl: "https://syntax.ide",
 });
 
-await ai.streamChat({
-  message: "Why does this return null?",
+const chat = createChatSession(ai, {
   systemPrompt: "You are Syntax, an expert mobile coding assistant.",
-  context: formatCodeContext({ code: currentFile, language: "typescript" }),
+});
+
+const reply = await chat.send("Why does this return null?", {
   onChunk: (text) => appendToScreen(text),
 });
 ```
 
-`transport: "xhr"` matters on React Native. It shows tokens as they arrive. Browsers and Node use the default `fetch` transport.
+`expoPlatform` is `"web"` on the website and `"native"` on the phone, so the settings screen can ask for Puter sign-in or for a key. Save a phone key with `secrets.setKey(pastedKey)`. The website build ignores that key.
 
-Save a key from your settings screen with `secrets.setKey(pastedKey)`.
+`chat` remembers the conversation. A second `send` while a reply is still streaming throws `code: "busy"`. Call `chat.stop()` when the user taps Stop or leaves the page. A failed or stopped send leaves the saved history as it was.
+
+A full screen sketch is in `examples/expo-app.ts`.
+
+## Where the key lives
+
+Put an OpenRouter key in the phone's secure store, or in the server environment as `OPENROUTER_API_KEY`. A website should use Puter, or it should call your server. A key placed in the website's JavaScript can be copied by anyone who opens the page.
+
+## Errors the screen can branch on
+
+Failures throw `AiBufferError`. Read `error.code`:
+
+| Code | What the screen does |
+| --- | --- |
+| `signed_out` | Show “Sign in to Puter”, then call `ai.signIn()` |
+| `missing_key` | Show the key field |
+| `rate_limited` | Show “Wait a few seconds” |
+| `payment_required` | Show “Add credits” |
+| `cancelled` | Stop the spinner. This is also the code when the two-minute limit fires |
+| `busy` | Ignore the extra tap |
+| `empty_message` | Ask for some text |
+| `provider_error` | Show `error.message` |
+
+```ts
+try {
+  await chat.send(message, { onChunk });
+} catch (error) {
+  if (error instanceof AiBufferError && error.code === "signed_out") {
+    await ai.signIn?.();
+  }
+}
+```
+
+Requests stop on their own after two minutes. Pass `timeoutMs: 0` on the client to wait without a limit, or pass `timeoutMs` on a single `send`.
+
+## Browser outside Expo
+
+```ts
+import { createAiClient, createChatSession } from "ai-buffer";
+
+const ai = createAiClient({ provider: "puter", model: "openai/gpt-4o-mini" });
+const chat = createChatSession(ai, {
+  systemPrompt: "You plan simple meals from what is already in the kitchen.",
+});
+
+await ai.signIn?.();
+await chat.send("Give me three dinner ideas.", {
+  onChunk: (text) => appendToScreen(text),
+});
+```
+
+`systemPrompt` belongs to that app. A joke app, a coding app, and a meal app each pass their own text.
 
 ## Node server
 
@@ -128,15 +165,15 @@ for chunk in stream_openrouter(
 This package does not add a chat window by itself. The app still has to:
 
 1. Collect the message.
-2. Keep the history.
-3. Pass a `systemPrompt` written for that app.
-4. Show `onChunk` on the screen.
+2. Pass a `systemPrompt` written for that app. `createChatSession` will keep the history after that.
+3. Show `onChunk` on the screen.
+4. Branch on `error.code` for sign-in, a missing key, or a wait message.
 
 `getInfo()` tells the screen whether Puter is signed in or an OpenRouter key is saved.
 
 ## Model names
 
-The default model is `openai/gpt-4o-mini`, the same id Syntax IDE already uses. Pass `model` to use another id that your provider lists. Puter and OpenRouter do not always share the same catalog, so a phone and a website can use different ids.
+The default model is `openai/gpt-4o-mini`, the same id Syntax IDE already uses. Puter and OpenRouter do not share one catalog. On Expo, set `puterModel` and `openrouterModel` separately. On a plain client, pass `model` to `createPuterClient` or `createOpenRouterClient`.
 
 ## Develop this repo
 

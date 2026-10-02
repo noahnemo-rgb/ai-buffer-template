@@ -10,6 +10,8 @@ export interface OpenRouterStreamOptions {
   appName?: string;
   transport?: "fetch" | "xhr";
   signal?: AbortSignal;
+  /** Fires when the request has run past its time limit. Combined with `signal` for the socket. */
+  timeoutSignal?: AbortSignal;
   onChunk?: (text: string) => void;
   fetchImpl?: typeof fetch;
 }

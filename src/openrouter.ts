@@ -1,4 +1,5 @@
-import { openRouterHttpError } from "./errors.js";
+import { anySignal } from "./abort.js";
+import { AiBufferError, openRouterHttpError } from "./errors.js";
 import { readOpenRouterSse } from "./sse.js";
 import { streamOpenRouterXhr } from "./openrouter-xhr.js";
 import { OPENROUTER_URL, type OpenRouterStreamOptions } from "./openrouter-shared.js";
@@ -9,12 +10,23 @@ export type { OpenRouterStreamOptions };
 export async function streamOpenRouter(options: OpenRouterStreamOptions): Promise<string> {
   const apiKey = options.apiKey.trim();
   if (!apiKey) {
-    throw new Error("OpenRouter API key is empty.");
+    throw new AiBufferError(
+      "missing_key",
+      "OpenRouter API key is not set. Add a key on this device, or set OPENROUTER_API_KEY on the server.",
+    );
   }
+  const signal = combinedSignal(options);
+  const linked = { ...options, signal };
   if (options.transport === "xhr") {
-    return streamOpenRouterXhr(options);
+    return streamOpenRouterXhr(linked);
   }
-  return streamOpenRouterFetch(options);
+  return streamOpenRouterFetch(linked);
+}
+
+function combinedSignal(options: OpenRouterStreamOptions): AbortSignal | undefined {
+  const parts = [options.signal, options.timeoutSignal].filter((signal): signal is AbortSignal => Boolean(signal));
+  if (parts.length === 0) return undefined;
+  return anySignal(parts);
 }
 
 async function streamOpenRouterFetch(options: OpenRouterStreamOptions): Promise<string> {
