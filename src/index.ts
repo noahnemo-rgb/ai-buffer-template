@@ -1,6 +1,10 @@
+export { DEFAULT_TIMEOUT_MS } from "./abort.js";
 export { createAiClient, createOpenRouterClient, createPuterClient } from "./client.js";
 export type { AiClientOptions, OpenRouterClientOptions, PuterClientOptions } from "./client.js";
-export { asAiError, formatAiError } from "./errors.js";
+export { AiBufferError, asAiError, codeFor, formatAiError } from "./errors.js";
+export type { AiErrorCode } from "./errors.js";
+export { createChatSession } from "./session.js";
+export type { ChatSession, ChatSessionOptions, ChatSessionSendOptions } from "./session.js";
 export {
   buildMessages,
   buildUserText,

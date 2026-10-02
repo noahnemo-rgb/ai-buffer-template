@@ -24,6 +24,8 @@ export interface StreamChatParams {
   context?: string;
   onChunk?: (text: string) => void;
   signal?: AbortSignal;
+  /** `0` waits without a limit. Falls back to the client's timeout, then two minutes. */
+  timeoutMs?: number;
 }
 
 export interface AiProviderInfo {
