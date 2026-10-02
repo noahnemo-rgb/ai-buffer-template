@@ -2,6 +2,7 @@ import { haltError, raceAbort, startTimeout, DEFAULT_TIMEOUT_MS } from "./abort.
 import { AiBufferError, asAiError } from "./errors.js";
 import { buildMessages, buildUserText, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT } from "./messages.js";
 import { streamOpenRouter } from "./openrouter.js";
+import { DEFAULT_SPACE_BUNNY_EFFORT, SPACE_BUNNY_MODEL, spaceBunnyExtra, type SpaceBunnyReasoningEffort } from "./space-bunny.js";
 import { extractPuterText, isAsyncIterable, loadPuterDefault, puterChunkError } from "./puter.js";
 import type { AiClient, ChatMessage, PuterLike, StreamChatParams } from "./types.js";
 
@@ -25,13 +26,21 @@ export interface OpenRouterClientOptions {
   /** Use "xhr" in React Native so tokens show up as they arrive. */
   transport?: "fetch" | "xhr";
   fetchImpl?: typeof fetch;
+  /** Merged into the chat-completions JSON. Space Bunny Alpha uses this for reasoning effort. */
+  extra?: Record<string, unknown>;
   /** `0` waits without a limit. The default is two minutes. */
   timeoutMs?: number;
 }
 
+export interface SpaceBunnyClientOptions extends Omit<OpenRouterClientOptions, "model" | "getModel" | "extra"> {
+  /** Default is `medium`. The model accepts low, medium, high, xhigh, and max. */
+  reasoningEffort?: SpaceBunnyReasoningEffort;
+}
+
 export type AiClientOptions =
   | ({ provider: "puter" } & PuterClientOptions)
-  | ({ provider: "openrouter" } & OpenRouterClientOptions);
+  | ({ provider: "openrouter" } & OpenRouterClientOptions)
+  | ({ provider: "space-bunny" } & SpaceBunnyClientOptions);
 
 function requireMessage(params: StreamChatParams): void {
   if (!params.message.trim() && !params.context?.trim()) {
@@ -193,6 +202,7 @@ export function createOpenRouterClient(options: OpenRouterClientOptions): AiClie
             timeoutSignal: timeout?.signal,
             onChunk: params.onChunk,
             fetchImpl: options.fetchImpl,
+            extra: options.extra,
           }),
           signals,
         );
@@ -205,7 +215,37 @@ export function createOpenRouterClient(options: OpenRouterClientOptions): AiClie
   };
 }
 
+export function createSpaceBunnyClient(options: SpaceBunnyClientOptions): AiClient {
+  const effort = options.reasoningEffort ?? DEFAULT_SPACE_BUNNY_EFFORT;
+  const inner = createOpenRouterClient({
+    getApiKey: options.getApiKey,
+    model: SPACE_BUNNY_MODEL,
+    defaultSystemPrompt: options.defaultSystemPrompt,
+    siteUrl: options.siteUrl,
+    appName: options.appName,
+    transport: options.transport,
+    fetchImpl: options.fetchImpl,
+    timeoutMs: options.timeoutMs,
+    extra: spaceBunnyExtra(effort),
+  });
+  return {
+    id: "space-bunny",
+    async getInfo() {
+      const key = (await options.getApiKey())?.trim();
+      return {
+        label: "Space Bunny Alpha",
+        description: key
+          ? `Calling ${SPACE_BUNNY_MODEL} through OpenRouter. Reasoning effort is ${effort}. The preview does not charge for tokens.`
+          : "Add an OpenRouter API key. Space Bunny Alpha is requested as stealth/space-bunny-alpha.",
+        configured: Boolean(key),
+      };
+    },
+    streamChat: (params) => inner.streamChat(params),
+  };
+}
+
 export function createAiClient(options: AiClientOptions): AiClient {
   if (options.provider === "puter") return createPuterClient(options);
+  if (options.provider === "space-bunny") return createSpaceBunnyClient(options);
   return createOpenRouterClient(options);
 }

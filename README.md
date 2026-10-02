@@ -1,6 +1,6 @@
 # ai-buffer
 
-A small shared adapter for **Puter** and **OpenRouter**. Each app keeps its own instructions. This package only sends the chat and streams the reply back.
+A small shared adapter for **Puter**, **OpenRouter**, and **Space Bunny Alpha**. Each app keeps its own instructions. This package only sends the chat and streams the reply back.
 
 Your phone app, your website, and your Python API can all call the same kind of function. The provider changes. The call does not.
 
@@ -9,6 +9,7 @@ Your phone app, your website, and your Python API can all call the same kind of 
 | Browser | The person signed in to Puter | `provider: "puter"` |
 | iPhone or Android | The person who saved an OpenRouter key on the device | `provider: "openrouter"` and `transport: "xhr"` |
 | A server you run | You, with `OPENROUTER_API_KEY` | `provider: "openrouter"` |
+| Any of those, when you ask for it | The same OpenRouter key | `provider: "space-bunny"` |
 
 Puter sign-in happens in the browser. A phone and a Python server use OpenRouter instead. The adapter hides that split.
 
@@ -135,6 +136,42 @@ const ai = createAiClient({
 ```
 
 Copy `.env.example` to `.env` on the server. Do not commit `.env`.
+
+## Space Bunny Alpha
+
+Space Bunny Alpha is a free stealth model on OpenRouter. The model id is `stealth/space-bunny-alpha`. It uses the same OpenRouter key as the other server route. Puter sign-in does not reach it.
+
+```ts
+import { createAiClient, createCallRouter } from "ai-buffer";
+
+const bunny = createAiClient({
+  provider: "space-bunny",
+  getApiKey: () => process.env.OPENROUTER_API_KEY,
+  reasoningEffort: "medium",
+  appName: "My Server App",
+});
+
+const router = createCallRouter({
+  spaceBunny: { getApiKey: () => process.env.OPENROUTER_API_KEY, reasoningEffort: "medium" },
+  openrouter: { getApiKey: () => process.env.OPENROUTER_API_KEY, model: "openai/gpt-4o-mini" },
+  puter: { model: "openai/gpt-4o-mini" },
+});
+
+await router.streamChat({ route: "space-bunny", message: "Sketch a small API." });
+```
+
+With no `route`, the router tries Space Bunny Alpha, then OpenRouter, then Puter, and skips a route that was not configured. It moves to the next route when the key is missing, Puter is signed out, the provider is rate limited, payment is required, or the provider returns another error. An empty message, a cancelled call, or a busy session stays on the route that received it.
+
+Reasoning effort is `low`, `medium`, `high`, `xhigh`, or `max`. The default is `medium`.
+
+Python uses the same key and model:
+
+```python
+from ai_buffer import stream_space_bunny
+
+for chunk in stream_space_bunny(api_key=os.environ["OPENROUTER_API_KEY"], messages=messages):
+    print(chunk, end="", flush=True)
+```
 
 ## Python / FastAPI
 

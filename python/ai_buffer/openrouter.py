@@ -29,6 +29,7 @@ def stream_openrouter(
     site_url: str | None = None,
     app_name: str | None = None,
     timeout_sec: float = 120.0,
+    extra: dict[str, Any] | None = None,
     open_stream: OpenStream | None = None,
 ) -> Iterator[str]:
     """Yield plain-text deltas from OpenRouter's streaming response."""
@@ -48,7 +49,10 @@ def stream_openrouter(
     if app_name:
         headers["X-Title"] = app_name
 
-    payload = json.dumps({"model": model, "messages": messages, "stream": True}).encode("utf-8")
+    body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+    if extra:
+        body.update(extra)
+    payload = json.dumps(body).encode("utf-8")
     opener = open_stream or _urlopen_stream
     buffered = ""
     parsed_through = 0

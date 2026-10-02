@@ -1,5 +1,5 @@
 import { openRouterHttpError } from "./errors.js";
-import { OPENROUTER_URL, type OpenRouterStreamOptions } from "./openrouter-shared.js";
+import { OPENROUTER_URL, openRouterRequestBody, type OpenRouterStreamOptions } from "./openrouter-shared.js";
 import { drainOpenRouterSse } from "./sse.js";
 
 interface XhrLike {
@@ -88,12 +88,6 @@ export function streamOpenRouterXhr(options: OpenRouterStreamOptions): Promise<s
     xhr.onabort = () => fail(abortError());
 
     options.signal?.addEventListener("abort", () => xhr.abort(), { once: true });
-    xhr.send(
-      JSON.stringify({
-        model: options.model,
-        messages: options.messages,
-        stream: true,
-      }),
-    );
+    xhr.send(openRouterRequestBody(options));
   });
 }

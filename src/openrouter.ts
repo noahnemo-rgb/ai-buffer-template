@@ -2,7 +2,7 @@ import { anySignal } from "./abort.js";
 import { AiBufferError, openRouterHttpError } from "./errors.js";
 import { readOpenRouterSse } from "./sse.js";
 import { streamOpenRouterXhr } from "./openrouter-xhr.js";
-import { OPENROUTER_URL, type OpenRouterStreamOptions } from "./openrouter-shared.js";
+import { OPENROUTER_URL, openRouterRequestBody, type OpenRouterStreamOptions } from "./openrouter-shared.js";
 
 export { OPENROUTER_URL };
 export type { OpenRouterStreamOptions };
@@ -41,11 +41,7 @@ async function streamOpenRouterFetch(options: OpenRouterStreamOptions): Promise<
   const response = await fetchImpl(OPENROUTER_URL, {
     method: "POST",
     headers,
-    body: JSON.stringify({
-      model: options.model,
-      messages: options.messages,
-      stream: true,
-    }),
+    body: openRouterRequestBody(options),
     signal: options.signal,
   });
 
