@@ -1,6 +1,6 @@
 {
   "name": "ai-buffer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shared OpenRouter and Puter chat adapter. One call, your own instructions, any app.",
   "type": "module",
   "main": "./dist/index.js",
@@ -9,6 +9,11 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./expo": {
+      "react-native": "./dist/expo-native.js",
+      "browser": "./dist/expo-web.js",
+      "default": "./dist/expo-web.js"
     }
   },
   "files": [

@@ -1,3 +1,4 @@
+import { AiBufferError, codeFor } from "./errors.js";
 import type { PuterChunk, PuterLike } from "./types.js";
 
 export async function loadPuterDefault(): Promise<PuterLike> {
@@ -43,6 +44,14 @@ export function puterErrorMessage(part: unknown): string | undefined {
   if (typeof chunk.message === "string" && chunk.message.trim()) return chunk.message;
   if (typeof chunk.text === "string" && chunk.text.trim()) return chunk.text;
   return "Puter stream error";
+}
+
+export function puterChunkError(part: unknown): AiBufferError | undefined {
+  const message = puterErrorMessage(part);
+  if (!message) return undefined;
+  const code = part && typeof part === "object" && "code" in part ? (part as { code?: string }).code : undefined;
+  const mapped = codeFor({ code, message });
+  return new AiBufferError(mapped === "provider_error" ? "provider_error" : mapped, message);
 }
 
 export function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
