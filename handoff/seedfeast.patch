@@ -1,0 +1,2737 @@
+From c3fdbdd7acdb11e6c718304092d76b87c374da95 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 2 Oct 2026 18:19:15 +0000
+Subject: [PATCH] Disentangle SeedFeast from external handles and cook through
+ ai-buffer.
+
+Stop forwarding integration webhooks, uploads, the Stripe proxy, and error or analytics phone-home. Recipe calls pin ai-buffer at d0c7cbc: Puter first in the browser, then Space Bunny Alpha, then the OpenRouter model when a key is present.
+---
+ .env.example                    |   8 +
+ .gitignore                      |   1 +
+ AuthWebView.jsx                 |   6 -
+ DeviceErrorBoundary.ios.tsx     |  42 +-
+ DeviceErrorBoundary.tsx         |  14 +-
+ README.md                       |   9 +-
+ analytics.ts                    |  86 +---
+ anything-menu.ios.tsx           |  17 +-
+ auth.js                         |  34 +-
+ bun.lock                        |   3 +
+ feast/handles.test.mjs          |  78 +++
+ feast/page.html                 | 188 +++++++
+ feast/seedfeast-router.js       | 107 ++++
+ feast/seedfeast-router.test.mjs |  76 +++
+ fetch.ts                        | 134 +----
+ global.d.ts                     |   8 -
+ index.ts                        | 124 ++---
+ package.json                    |   4 +-
+ page.jsx                        | 154 +-----
+ report-error-to-remote.js       |  53 +-
+ report-error-to-remote.test.js  |  88 +---
+ root.tsx                        |   2 +-
+ route-builder.ts                |   2 +-
+ route.js                        |  25 +-
+ store.js                        |   4 +-
+ stripe.ts                       | 859 +-------------------------------
+ upload.js                       |  39 +-
+ useAuth.js                      |  20 +-
+ useUpload.js                    |  66 +--
+ useUser.js                      |   2 +-
+ vite.config.ts                  |   7 +-
+ 31 files changed, 630 insertions(+), 1630 deletions(-)
+ create mode 100644 .env.example
+ create mode 100644 .gitignore
+ create mode 100644 feast/handles.test.mjs
+ create mode 100644 feast/page.html
+ create mode 100644 feast/seedfeast-router.js
+ create mode 100644 feast/seedfeast-router.test.mjs
+
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..5d1d30e
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,8 @@
++# Browser cooking tries Puter first. This key is the server fallback only:
++# Space Bunny Alpha, then OPENROUTER_MODEL.
++OPENROUTER_API_KEY=
++OPENROUTER_MODEL=openai/gpt-4o-mini
++
++AUTH_SECRET=
++DATABASE_URL=
++STRIPE_SECRET_KEY=
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..c2658d7
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1 @@
++node_modules/
+diff --git a/AuthWebView.jsx b/AuthWebView.jsx
+index b92a225..7636f8a 100644
+--- a/AuthWebView.jsx
++++ b/AuthWebView.jsx
+@@ -77,12 +77,6 @@ export const AuthWebView = ({ mode, proxyURL, baseURL }) => {
+       source={{
+         uri: currentURI,
+       }}
+-      headers={{
+-        'x-createxyz-project-group-id': process.env.EXPO_PUBLIC_PROJECT_GROUP_ID,
+-        host: process.env.EXPO_PUBLIC_HOST,
+-        'x-forwarded-host': process.env.EXPO_PUBLIC_HOST,
+-        'x-createxyz-host': process.env.EXPO_PUBLIC_HOST,
+-      }}
+       onShouldStartLoadWithRequest={(request) => {
+         if (request.url === `${baseURL}${callbackUrl}`) {
+           fetch(request.url, { credentials: 'include' }).then(async (response) => {
+diff --git a/DeviceErrorBoundary.ios.tsx b/DeviceErrorBoundary.ios.tsx
+index cbe1d52..7ec78eb 100644
+--- a/DeviceErrorBoundary.ios.tsx
++++ b/DeviceErrorBoundary.ios.tsx
+@@ -1,4 +1,3 @@
+-import { ErrorFixEvents, errorFixEmitter } from '@anythingai/app/utils';
+ import { SplashScreen } from 'expo-router/build/exports';
+ import * as Updates from 'expo-updates';
+ import React, { type ReactNode, useCallback, useEffect } from 'react';
+@@ -14,56 +13,29 @@ type ErrorBoundaryState = {
+   sentLogs: boolean;
+ };
+ 
+-const DeviceErrorBoundary = ({
+-  sentLogs,
+-  error,
+-}: {
+-  sentLogs: boolean;
+-  error: unknown | null;
+-}) => {
+-  const isAnythingApp = process.env.EXPO_PUBLIC_IS_ANYTHING_APP === 'true';
++const DeviceErrorBoundary = () => {
+   useEffect(() => {
+     SplashScreen.hideAsync().catch(() => {});
+   }, []);
+-  const handleFixClick = useCallback(() => {
+-    const seraizliedError = serializeError(error);
+-    const displayableError = isErrorLike(seraizliedError)
+-      ? `${seraizliedError.message}\n\n${seraizliedError.stack}`
+-      : JSON.stringify(seraizliedError, null, 2);
+-    errorFixEmitter.emit(ErrorFixEvents.ERROR_FIX_SUBMITTED, {
+-      error: displayableError,
+-    });
+-  }, [error]);
+   const handleReload = useCallback(async () => {
+     if (Platform.OS === 'web') {
+       window.location.reload();
+       return;
+     }
+ 
+-    Updates.reloadAsync().catch((error) => {
++    Updates.reloadAsync().catch(() => {
+       // no-op, we don't want to show an error here
+     });
+   }, []);
+   return (
+     <SharedErrorBoundary
+       isOpen
+-      description={
+-        sentLogs && !isAnythingApp
+-          ? 'It looks like an error occurred while trying to use your app. This error has been reported to the AI agent and should be visible to the AI soon. If it is not present please see anything.com/docs for help'
+-          : 'It looks like an error occurred while trying to use your app. Please see anything.com/docs for help'
+-      }
++      description="It looks like an error occurred while trying to use your app. Restart SeedFeast and try that step again."
+     >
+       <View style={{ flexDirection: 'row', gap: 8 }}>
+-        {isAnythingApp && (
+-          <Button color="primary" onPress={handleFixClick}>
+-            Try to fix
+-          </Button>
+-        )}
+-        {!isAnythingApp && (
+-          <Button color="primary" onPress={handleReload}>
+-            Restart app
+-          </Button>
+-        )}
++        <Button color="primary" onPress={handleReload}>
++          Restart app
++        </Button>
+       </View>
+     </SharedErrorBoundary>
+   );
+@@ -105,7 +77,7 @@ export class DeviceErrorBoundaryWrapper extends React.Component<
+ 
+   render() {
+     if (this.state.hasError) {
+-      return <DeviceErrorBoundary error={this.state.error} sentLogs={this.state.sentLogs} />;
++      return <DeviceErrorBoundary />;
+     }
+     return this.props.children;
+   }
+diff --git a/DeviceErrorBoundary.tsx b/DeviceErrorBoundary.tsx
+index bf1b70c..587535e 100644
+--- a/DeviceErrorBoundary.tsx
++++ b/DeviceErrorBoundary.tsx
+@@ -9,11 +9,7 @@ import { getTestFlightLogger } from './testflight-logger';
+ 
+ type ErrorBoundaryState = { hasError: boolean; error: unknown | null; sentLogs: boolean };
+ 
+-const DeviceErrorBoundary = ({
+-  sentLogs,
+-}: {
+-  sentLogs: boolean;
+-}) => {
++const DeviceErrorBoundary = () => {
+   useEffect(() => {
+     SplashScreen.hideAsync().catch(() => {});
+   }, []);
+@@ -30,11 +26,7 @@ const DeviceErrorBoundary = ({
+   return (
+     <SharedErrorBoundary
+       isOpen
+-      description={
+-        sentLogs
+-          ? 'It looks like an error occurred while trying to use your app. This error has been reported to the AI agent and should be visible to the AI soon. If it is not present please see anything.com/docs for help'
+-          : 'It looks like an error occurred while trying to use your app. Please see anything.com/docs for help'
+-      }
++      description="It looks like an error occurred while trying to use your app. Restart SeedFeast and try that step again."
+     >
+       <View style={{ flexDirection: 'row', gap: 8 }}>
+         <Button color="primary" onPress={handleReload}>
+@@ -74,7 +66,7 @@ export class DeviceErrorBoundaryWrapper extends React.Component<
+ 
+   render() {
+     if (this.state.hasError) {
+-      return <DeviceErrorBoundary sentLogs={this.state.sentLogs} />;
++      return <DeviceErrorBoundary />;
+     }
+     return this.props.children;
+   }
+diff --git a/README.md b/README.md
+index b9ea8e2..5a18538 100644
+--- a/README.md
++++ b/README.md
+@@ -1,2 +1,9 @@
+ # SeedFeast
+-From seed to gourmet feast
++
++From seed to gourmet feast.
++
++SeedFeast cooks a recipe from the seeds and ingredients you already have. Open `/feast` and describe what is on hand.
++
++Model calls use [ai-buffer](https://github.com/noahnemo-rgb/ai-buffer-template) at commit `d0c7cbc40df991805efaf64223a00fc3fbb72e15`. In the browser, Puter runs first. A key saved in that tab tries Space Bunny Alpha (`stealth/space-bunny-alpha`), then `OPENROUTER_MODEL` (default `openai/gpt-4o-mini`). The server uses `OPENROUTER_API_KEY` in that same keyed order and does not call Puter. Keys stay in the browser tab or in the server environment.
++
++SeedFeast accounts and Stripe checkout stay on this app. Integration handles, upload relays, and webhook forwarding to an external project host are disconnected.
+diff --git a/analytics.ts b/analytics.ts
+index ee2a6f1..c8b84b3 100644
+--- a/analytics.ts
++++ b/analytics.ts
+@@ -1,90 +1,6 @@
+-import AsyncStorage from '@react-native-async-storage/async-storage';
+-import { usePathname } from 'expo-router';
+-import { useEffect } from 'react';
+-import { Platform } from 'react-native';
+-
+-const VISITOR_ID_KEY = 'anything_analytics_visitor_id';
+-
+ /**
+- * Mirror the gating used by the TestFlight logger: only emit from real
+- * (production) builds, never from the in-builder dev runtime.
+- */
+-function isActive(): boolean {
+-  return !__DEV__ && process.env.EXPO_PUBLIC_CREATE_ENV !== 'DEVELOPMENT';
+-}
+-
+-function generateVisitorId(): string {
+-  const rand = () => Math.random().toString(36).slice(2);
+-  return `${rand()}${rand()}`.slice(0, 32);
+-}
+-
+-let visitorIdPromise: Promise<string> | null = null;
+-
+-/**
+- * Stable, anonymous, per-install id. Not a secret, so AsyncStorage (not the
+- * keychain) is the right home. Generated once and reused for the install.
+- */
+-function getVisitorId(): Promise<string> {
+-  if (!visitorIdPromise) {
+-    visitorIdPromise = (async () => {
+-      try {
+-        const existing = await AsyncStorage.getItem(VISITOR_ID_KEY);
+-        if (existing) return existing;
+-        const created = generateVisitorId();
+-        await AsyncStorage.setItem(VISITOR_ID_KEY, created);
+-        return created;
+-      } catch {
+-        // If persistence fails, fall back to a session-scoped id so the
+-        // current run still attributes its views to one visitor.
+-        return generateVisitorId();
+-      }
+-    })();
+-  }
+-  return visitorIdPromise;
+-}
+-
+-/**
+- * Records one screen view per route change. The endpoint enforces the global
+- * flag and the project's analytics opt-in, dropping events (204) when off, so
+- * this always fires and the server decides whether to keep it.
++ * Screen views stay in the app. SeedFeast does not post them to an external host.
+  */
+ export function ScreenViewTracker() {
+-  const pathname = usePathname();
+-
+-  useEffect(() => {
+-    if (!isActive()) return;
+-
+-    const endpoint = process.env.EXPO_PUBLIC_ANALYTICS_ENDPOINT;
+-    const host = process.env.EXPO_PUBLIC_HOST;
+-    const projectGroupId = process.env.EXPO_PUBLIC_PROJECT_GROUP_ID;
+-    if (!endpoint || !host || !projectGroupId || !pathname) return;
+-
+-    let cancelled = false;
+-    void (async () => {
+-      try {
+-        const visitorId = await getVisitorId();
+-        if (cancelled) return;
+-        await fetch(endpoint, {
+-          method: 'POST',
+-          headers: { 'Content-Type': 'application/json' },
+-          body: JSON.stringify({
+-            d: host,
+-            p: pathname,
+-            pgid: projectGroupId,
+-            vid: visitorId,
+-            os: Platform.OS,
+-            dt: 'mobile',
+-          }),
+-        });
+-      } catch {
+-        // Analytics must never crash or block the host app.
+-      }
+-    })();
+-
+-    return () => {
+-      cancelled = true;
+-    };
+-  }, [pathname]);
+-
+   return null;
+ }
+diff --git a/anything-menu.ios.tsx b/anything-menu.ios.tsx
+index 3b3dd6a..adc93dd 100644
+--- a/anything-menu.ios.tsx
++++ b/anything-menu.ios.tsx
+@@ -1,16 +1,3 @@
+-import React from "react";
+-import { View, StyleSheet } from "react-native";
+-import LauncherMenuContainer from "@anythingai/app/screens/launcher-menu";
+-const isExpoGo = globalThis.expo?.modules?.ExpoGo
+-
+-export default () => {
+-  if (isExpoGo) {
+-    return null;
+-  }
+-  return (
+-    <View style={{ ...StyleSheet.absoluteFillObject, zIndex: 9999 }} pointerEvents="box-none">
+-      <LauncherMenuContainer />
+-    </View>
+-
+-  )
++export default function AnythingMenu() {
++  return null;
+ }
+diff --git a/auth.js b/auth.js
+index d6352af..27b78b1 100644
+--- a/auth.js
++++ b/auth.js
+@@ -1,9 +1,7 @@
+ /**
+- * WARNING: This file connects this app to Anythings's internal auth system. Do
+- * not attempt to edit it. Modifying it will have no effect on your project as it is controlled by our system.
+- * Do not import @auth/create or @auth/create anywhere else or it may break. This is an internal package.
++ * SeedFeast accounts stay on this app's Neon database and AUTH_SECRET.
+  */
+-import CreateAuth from "@auth/create"
++import { Auth } from "@auth/core"
+ import Credentials from "@auth/core/providers/credentials"
+ import { CredentialsSignin } from '@auth/core/errors'
+ import { Pool } from '@neondatabase/serverless'
+@@ -255,7 +253,11 @@ const pool = new Pool({
+     });
+ const adapter = Adapter(pool);
+ 
+-export const { auth } = CreateAuth({
++const authConfig = {
++  trustHost: true,
++  secret: process.env.AUTH_SECRET,
++  basePath: "/api/auth",
++  adapter,
+   providers: [Credentials({
+   id: 'credentials-signin',
+   name: 'Credentials Sign in',
+@@ -360,4 +362,24 @@ export const { auth } = CreateAuth({
+     signIn: '/account/signin',
+     signOut: '/account/logout',
+   },
+-})
+\ No newline at end of file
++}
++
++export async function auth(request) {
++  if (!request || typeof request.headers?.get !== "function" || !request.url) {
++    return null
++  }
++  let origin
++  try {
++    origin = new URL(request.url).origin
++  } catch {
++    return null
++  }
++  const response = await Auth(
++    new Request(`${origin}/api/auth/session`, { headers: request.headers }),
++    authConfig,
++  )
++  if (!response.ok) return null
++  const session = await response.json()
++  if (!session || typeof session !== "object" || !session.user) return null
++  return session
++}
+\ No newline at end of file
+diff --git a/bun.lock b/bun.lock
+index 91e0a87..56849b9 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -23,6 +23,7 @@
+         "@tanstack/react-table": "^8.21.2",
+         "@types/babel__core": "^7.20.5",
+         "@vis.gl/react-google-maps": "^0.8.3",
++        "ai-buffer": "github:noahnemo-rgb/ai-buffer-template#d0c7cbc40df991805efaf64223a00fc3fbb72e15",
+         "argon2": "^0.43.0",
+         "classnames": "^2.5.1",
+         "clean-stack": "^5.2.0",
+@@ -855,6 +856,8 @@
+ 
+     "agent-base": ["agent-base@7.1.4", "", {}, "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="],
+ 
++    "ai-buffer": ["ai-buffer@github:noahnemo-rgb/ai-buffer-template#d0c7cbc", { "peerDependencies": { "@heyputer/puter.js": "^2.0.0" }, "optionalPeers": ["@heyputer/puter.js"] }, "noahnemo-rgb-ai-buffer-template-d0c7cbc", "sha512-a/AQ8ZHq5VKXrrKPsILEI9bF8SZSIDJYQjZlttKjnPxLfMF7PsDPuqWc7OSyTXnsvufzjgUhVZe11dBBrFVMNw=="],
++
+     "ansi-regex": ["ansi-regex@5.0.1", "", {}, "sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ=="],
+ 
+     "ansi-styles": ["ansi-styles@5.2.0", "", {}, "sha512-Cxwpt2SfTzTtXcfOlzGEee8O+c+MmUgGrNiBcXnuWxuFJHe6a5Hz7qwhwe5OgaSYI0IJvkLqWX1ASG+cJOkEiA=="],
+diff --git a/feast/handles.test.mjs b/feast/handles.test.mjs
+new file mode 100644
+index 0000000..4c547ca
+--- /dev/null
++++ b/feast/handles.test.mjs
+@@ -0,0 +1,78 @@
++import assert from "node:assert/strict";
++import { readFile } from "node:fs/promises";
++import test from "node:test";
++import { reportErrorToRemote, sendLogsToRemote } from "../report-error-to-remote.js";
++import upload from "../upload.js";
++
++const banned = [
++  "create.xyz",
++  "api.anything.com",
++  "anything.com",
++  "@anythingai",
++  "@auth/create",
++  "createanything.com",
++  "/_create/api/upload",
++];
++
++const files = [
++  "index.ts",
++  "upload.js",
++  "useUpload.js",
++  "fetch.ts",
++  "stripe.ts",
++  "analytics.ts",
++  "anything-menu.ios.tsx",
++  "DeviceErrorBoundary.tsx",
++  "DeviceErrorBoundary.ios.tsx",
++  "auth.js",
++  "page.jsx",
++  "useAuth.js",
++  "useUser.js",
++  "root.tsx",
++  "AuthWebView.jsx",
++  "route.js",
++];
++
++test("uploads do not call Anything", async () => {
++  const calls = [];
++  const previous = globalThis.fetch;
++  globalThis.fetch = async (url) => {
++    calls.push(String(url));
++    return new Response("no");
++  };
++  try {
++    const result = await upload({ url: "https://example.com/a.png" });
++    assert.match(result.error, /disconnected/);
++    assert.deepEqual(calls, []);
++  } finally {
++    globalThis.fetch = previous;
++  }
++});
++
++test("errors stay on the device even when Anything log env vars are set", async () => {
++  process.env.EXPO_PUBLIC_LOGS_ENDPOINT = "https://logs.example/ingest";
++  process.env.EXPO_PUBLIC_PROJECT_GROUP_ID = "pg";
++  process.env.EXPO_PUBLIC_CREATE_TEMP_API_KEY = "key";
++  let called = false;
++  const previous = globalThis.fetch;
++  globalThis.fetch = async () => {
++    called = true;
++    return new Response("ok");
++  };
++  try {
++    assert.deepEqual(await sendLogsToRemote([{ message: "hi" }]), { success: false });
++    assert.deepEqual(await reportErrorToRemote({ error: new Error("boom") }), { success: false });
++    assert.equal(called, false);
++  } finally {
++    globalThis.fetch = previous;
++  }
++});
++
++test("SeedFeast source no longer names Anything hosts or packages", async () => {
++  for (const file of files) {
++    const text = await readFile(new URL(`../${file}`, import.meta.url), "utf8");
++    for (const word of banned) {
++      assert.equal(text.includes(word), false, `${file} still mentions ${word}`);
++    }
++  }
++});
+diff --git a/feast/page.html b/feast/page.html
+new file mode 100644
+index 0000000..dfc4543
+--- /dev/null
++++ b/feast/page.html
+@@ -0,0 +1,188 @@
++<!doctype html>
++<html lang="en">
++  <head>
++    <meta charset="utf-8" />
++    <meta name="viewport" content="width=device-width, initial-scale=1" />
++    <title>SeedFeast</title>
++    <script type="importmap">
++      {
++        "imports": {
++          "ai-buffer": "/vendor/ai-buffer/index.js"
++        }
++      }
++    </script>
++    <style>
++      :root {
++        color-scheme: light;
++        font-family: Georgia, "Iowan Old Style", serif;
++        background: #f6f1e7;
++        color: #2b2118;
++      }
++      body {
++        margin: 0;
++        min-height: 100vh;
++      }
++      main {
++        max-width: 40rem;
++        margin: 0 auto;
++        padding: 2.5rem 1.25rem 4rem;
++      }
++      h1 {
++        font-size: 2.4rem;
++        margin-bottom: 0.25rem;
++      }
++      p {
++        line-height: 1.5;
++      }
++      label {
++        display: block;
++        font-family: "Avenir Next", "Segoe UI", sans-serif;
++        font-size: 0.85rem;
++        margin: 1rem 0 0.35rem;
++      }
++      textarea,
++      input {
++        width: 100%;
++        box-sizing: border-box;
++        border: 1px solid #c9b89a;
++        background: #fffdf8;
++        color: inherit;
++        border-radius: 0.4rem;
++        padding: 0.7rem 0.8rem;
++        font: inherit;
++      }
++      textarea {
++        min-height: 7rem;
++        resize: vertical;
++      }
++      .actions {
++        display: flex;
++        flex-wrap: wrap;
++        gap: 0.6rem;
++        margin-top: 1rem;
++      }
++      button {
++        font-family: "Avenir Next", "Segoe UI", sans-serif;
++        background: #6d4c2f;
++        color: #fffaf3;
++        border: 0;
++        border-radius: 999px;
++        padding: 0.7rem 1.1rem;
++        cursor: pointer;
++      }
++      button.secondary {
++        background: transparent;
++        color: #6d4c2f;
++        border: 1px solid #6d4c2f;
++      }
++      button:disabled {
++        opacity: 0.6;
++        cursor: wait;
++      }
++      #answer,
++      #error {
++        white-space: pre-wrap;
++      }
++      #error {
++        color: #8a2a1a;
++      }
++    </style>
++  </head>
++  <body>
++    <main>
++      <h1>SeedFeast</h1>
++      <p>From seed to gourmet feast. Puter in this browser runs first. A key saved here tries Space Bunny Alpha, then your OpenRouter model. The server key is the last stop and stays on the server.</p>
++      <form id="cook-form">
++        <label for="seeds">Seeds and ingredients</label>
++        <textarea id="seeds" name="seeds" required placeholder="tomato, basil, day-old bread"></textarea>
++        <label for="notes">Notes</label>
++        <textarea id="notes" name="notes" placeholder="one pan, dinner for two"></textarea>
++        <label for="key">OpenRouter key, saved in this tab only</label>
++        <input id="key" name="key" type="password" autocomplete="off" />
++        <div class="actions">
++          <button id="cook" type="submit">Cook here</button>
++          <button id="server" class="secondary" type="button">Cook on the server</button>
++        </div>
++      </form>
++      <p id="error" role="alert"></p>
++      <pre id="answer"></pre>
++    </main>
++    <script src="https://js.puter.com/v2/" async></script>
++    <script type="module">
++      import { askFeast } from "/feast/seedfeast-router.js";
++
++      const KEY = "seedfeast_openrouter_key";
++      const form = document.querySelector("#cook-form");
++      const keyInput = document.querySelector("#key");
++      const answer = document.querySelector("#answer");
++      const error = document.querySelector("#error");
++      const cook = document.querySelector("#cook");
++      const server = document.querySelector("#server");
++      keyInput.value = sessionStorage.getItem(KEY) ?? "";
++
++      function seedsFromForm() {
++        return {
++          seeds: document.querySelector("#seeds").value,
++          notes: document.querySelector("#notes").value,
++        };
++      }
++
++      function rememberKey() {
++        const apiKey = keyInput.value.trim();
++        if (apiKey) sessionStorage.setItem(KEY, apiKey);
++        else sessionStorage.removeItem(KEY);
++        return apiKey;
++      }
++
++      function setBusy(busy) {
++        cook.disabled = busy;
++        server.disabled = busy;
++      }
++
++      form.addEventListener("submit", async (event) => {
++        event.preventDefault();
++        const apiKey = rememberKey();
++        answer.textContent = "";
++        error.textContent = "";
++        setBusy(true);
++        try {
++          const result = await askFeast({
++            ...seedsFromForm(),
++            apiKey,
++            platform: "browser",
++            loadPuter: async () => {
++              if (window.puter?.ai?.chat) return window.puter;
++              throw new Error("Puter is not available in this browser.");
++            },
++          });
++          answer.textContent = result.recipe;
++        } catch (err) {
++          error.textContent = err instanceof Error ? err.message : "SeedFeast could not cook that.";
++        } finally {
++          setBusy(false);
++        }
++      });
++
++      server.addEventListener("click", async () => {
++        rememberKey();
++        answer.textContent = "";
++        error.textContent = "";
++        setBusy(true);
++        try {
++          const response = await fetch("/api/feast", {
++            method: "POST",
++            headers: { "Content-Type": "application/json" },
++            body: JSON.stringify(seedsFromForm()),
++          });
++          const data = await response.json();
++          if (!response.ok) throw new Error(data.error || "The server could not cook that.");
++          answer.textContent = data.recipe;
++        } catch (err) {
++          error.textContent = err instanceof Error ? err.message : "SeedFeast could not cook that.";
++        } finally {
++          setBusy(false);
++        }
++      });
++    </script>
++  </body>
++</html>
+diff --git a/feast/seedfeast-router.js b/feast/seedfeast-router.js
+new file mode 100644
+index 0000000..493d4ce
+--- /dev/null
++++ b/feast/seedfeast-router.js
+@@ -0,0 +1,107 @@
++import { createCallRouter } from "ai-buffer";
++
++export const SEEDFEAST_MODEL = "openai/gpt-4o-mini";
++export const SEEDFEAST_SITE = "https://seedfeast.ai";
++export const SEEDFEAST_PROMPT = [
++  "You are SeedFeast.",
++  "Turn the seeds and ingredients the cook already has into one practical feast recipe.",
++  "Name the dish, list ingredients they have and any small pantry staples, then give clear steps.",
++  "Keep the recipe cookable in a home kitchen.",
++].join(" ");
++
++export function feastMessage(seeds, notes) {
++  const seedText = String(seeds ?? "").trim();
++  const noteText = String(notes ?? "").trim();
++  if (!seedText) {
++    throw new Error("Tell SeedFeast which seeds or ingredients you have.");
++  }
++  return noteText
++    ? `Seeds and ingredients:\n${seedText}\n\nNotes:\n${noteText}`
++    : `Seeds and ingredients:\n${seedText}`;
++}
++
++function keyedClient(apiKey, model, fetchImpl, timeoutMs) {
++  const key = typeof apiKey === "string" ? apiKey.trim() : "";
++  if (!key) return null;
++  const shared = {
++    getApiKey: () => key,
++    appName: "SeedFeast",
++    siteUrl: SEEDFEAST_SITE,
++    timeoutMs,
++    fetchImpl,
++  };
++  const named = typeof model === "string" && model.trim() ? model.trim() : SEEDFEAST_MODEL;
++  return {
++    spaceBunny: shared,
++    openrouter: named === "stealth/space-bunny-alpha" ? shared : { ...shared, model: named },
++  };
++}
++
++/**
++ * Browser order is Puter, then Space Bunny Alpha, then the OpenRouter model.
++ * A server has no Puter route. Space Bunny runs only when an OpenRouter key exists.
++ */
++export function createSeedFeastRouter({
++  apiKey,
++  model,
++  platform = "browser",
++  fetchImpl,
++  loadPuter,
++  timeoutMs,
++} = {}) {
++  const keyed = keyedClient(apiKey, model, fetchImpl, timeoutMs);
++  const browser = platform !== "server";
++  if (!browser && !keyed) return null;
++  return createCallRouter({
++    ...(browser ? { puter: { model: SEEDFEAST_MODEL, loadPuter, timeoutMs } } : {}),
++    ...(keyed ?? {}),
++    order: browser
++      ? keyed
++        ? ["puter", "space-bunny", "openrouter"]
++        : ["puter"]
++      : ["space-bunny", "openrouter"],
++  });
++}
++
++export async function askFeast({
++  seeds,
++  notes,
++  apiKey,
++  model,
++  platform = "browser",
++  fetchImpl,
++  loadPuter,
++  timeoutMs,
++} = {}) {
++  const message = feastMessage(seeds, notes);
++  const models = [];
++  const wrappedFetch = async (input, init) => {
++    try {
++      const payload = JSON.parse(String(init?.body));
++      if (typeof payload?.model === "string") models.push(payload.model);
++    } catch {
++      /* The model id is only for the cook's status line. */
++    }
++    const impl = fetchImpl ?? fetch;
++    return impl(input, init);
++  };
++  const router = createSeedFeastRouter({
++    apiKey,
++    model,
++    platform,
++    fetchImpl: wrappedFetch,
++    loadPuter,
++    timeoutMs,
++  });
++  if (!router) {
++    throw new Error(
++      "The server has no OpenRouter key. In the browser, Puter runs first, and a key saved on this device tries Space Bunny Alpha next.",
++    );
++  }
++  const recipe = await router.streamChat({
++    message,
++    systemPrompt: SEEDFEAST_PROMPT,
++    timeoutMs,
++  });
++  return { recipe, models };
++}
+diff --git a/feast/seedfeast-router.test.mjs b/feast/seedfeast-router.test.mjs
+new file mode 100644
+index 0000000..6686c3a
+--- /dev/null
++++ b/feast/seedfeast-router.test.mjs
+@@ -0,0 +1,76 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { AiBufferError } from "ai-buffer";
++import { askFeast, createSeedFeastRouter } from "./seedfeast-router.js";
++
++function sse(text) {
++  const body = `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\ndata: [DONE]\n`;
++  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
++}
++
++test("browser Puter fails over to Space Bunny Alpha, then the OpenRouter model", async () => {
++  const models = [];
++  const extras = [];
++  const result = await askFeast({
++    seeds: "tomato, basil, day-old bread",
++    notes: "one pan",
++    apiKey: "sk-test",
++    platform: "browser",
++    timeoutMs: 1000,
++    loadPuter: async () => {
++      throw Object.assign(new Error("slow down"), { status: 429 });
++    },
++    fetchImpl: async (_input, init) => {
++      const payload = JSON.parse(String(init?.body));
++      models.push(payload.model);
++      extras.push(payload.reasoning ?? null);
++      if (models.length === 1) return new Response("slow down", { status: 429 });
++      return sse("Tomato bread feast");
++    },
++  });
++
++  assert.equal(result.recipe, "Tomato bread feast");
++  assert.deepEqual(models, ["stealth/space-bunny-alpha", "openai/gpt-4o-mini"]);
++  assert.deepEqual(result.models, ["stealth/space-bunny-alpha", "openai/gpt-4o-mini"]);
++  assert.deepEqual(extras[0], { effort: "medium" });
++  assert.equal(extras[1], null);
++});
++
++test("a server key does not configure Puter", () => {
++  const router = createSeedFeastRouter({
++    apiKey: "sk-test",
++    platform: "server",
++    fetchImpl: async () => sse("ok"),
++  });
++  assert.equal(router.route("space-bunny").id, "space-bunny");
++  assert.throws(
++    () => router.route("puter"),
++    (error) => error instanceof AiBufferError && error.code === "provider_error",
++  );
++});
++
++test("the server stays quiet without a key", async () => {
++  assert.equal(createSeedFeastRouter({ platform: "server" }), null);
++  await assert.rejects(
++    () => askFeast({ seeds: "beans", platform: "server" }),
++    (error) => error instanceof Error && /no OpenRouter key/.test(error.message),
++  );
++});
++
++test("empty seeds do not call a model", async () => {
++  let called = false;
++  await assert.rejects(
++    () =>
++      askFeast({
++        seeds: "   ",
++        apiKey: "sk-test",
++        platform: "server",
++        fetchImpl: async () => {
++          called = true;
++          return sse("no");
++        },
++      }),
++    (error) => error instanceof Error && /seeds or ingredients/.test(error.message),
++  );
++  assert.equal(called, false);
++});
+diff --git a/fetch.ts b/fetch.ts
+index ed3f586..9a6d1b5 100644
+--- a/fetch.ts
++++ b/fetch.ts
+@@ -1,136 +1,8 @@
+ const originalFetch = fetch;
+-const isBackend = () => typeof window === 'undefined';
+ 
+-const safeStringify = (value: unknown) =>
+-  JSON.stringify(value, (_k, v) => {
+-    if (v instanceof Date) return { __t: 'Date', v: v.toISOString() };
+-    if (v instanceof Error)
+-      return { __t: 'Error', v: { name: v.name, message: v.message, stack: v.stack } };
+-    return v;
+-  });
+-
+-const postToParent = (level: string, text: string, extra: unknown) => {
+-  try {
+-    if (isBackend() || !window.parent || window.parent === window) {
+-      ('level' in console ? console[level] : console.log)(text, extra);
+-      return;
+-    }
+-    window.parent.postMessage(
+-      {
+-        type: 'sandbox:web:console-write',
+-        __viteConsole: true,
+-        level,
+-        text,
+-        args: [safeStringify(extra)],
+-      },
+-      '*'
+-    );
+-  } catch {
+-    /* noop */
+-  }
+-};
+-
+-const getUrlFromArgs = (...args: Parameters<typeof originalFetch>): string => {
+-  const [input] = args;
+-  if (typeof input === 'string') return input;
+-  if (input instanceof Request) return input.url;
+-  return `${input.protocol}//${input.host}${input.pathname}`;
+-};
+-
+-const isFirstPartyURL = (url: string) => {
+-  return url.startsWith('/integrations') || url.startsWith('/_create');
+-};
+-
+-const isSecondPartyUrl = (url: string) => {
+-  return (
+-    (process.env.NEXT_PUBLIC_CREATE_API_BASE_URL &&
+-      url.startsWith(process.env.NEXT_PUBLIC_CREATE_API_BASE_URL)) ||
+-    (process.env.NEXT_PUBLIC_CREATE_BASE_URL &&
+-      url.startsWith(process.env.NEXT_PUBLIC_CREATE_BASE_URL)) ||
+-    url.startsWith('https://www.create.xyz') ||
+-    url.startsWith('https://api.create.xyz/') ||
+-    url.startsWith('https://www.createanything.com') ||
+-    url.startsWith('https://api.createanything.com')
+-  );
+-};
+-
+-export const fetchWithHeaders = async (
++export const fetchWithHeaders = (
+   input: RequestInfo | URL,
+-  init?: RequestInit
+-): Promise<Response> => {
+-  const url = getUrlFromArgs(input, init);
+-
+-  const additionalHeaders = {
+-    'x-createxyz-project-group-id': process.env.NEXT_PUBLIC_PROJECT_GROUP_ID,
+-  };
+-
+-  const isExternalFetch = !isFirstPartyURL(url) && !isSecondPartyUrl(url);
+-  // we should not add headers to requests that don't go to our own server
+-  // or if it's an API request
+-  if (isExternalFetch || url.startsWith('/api')) {
+-    return originalFetch(input, init);
+-  }
+-
+-  // Normalize Request into init
+-  let finalInit: RequestInit;
+-  if (input instanceof Request) {
+-    const hasBody = !!input.body;
+-    finalInit = {
+-      method: input.method,
+-      headers: new Headers(input.headers),
+-      body: input.body,
+-      mode: input.mode,
+-      credentials: input.credentials,
+-      cache: input.cache,
+-      redirect: input.redirect,
+-      referrer: input.referrer,
+-      referrerPolicy: input.referrerPolicy,
+-      integrity: input.integrity,
+-      keepalive: input.keepalive,
+-      signal: input.signal,
+-      ...(hasBody ? { duplex: 'half' } : {}),
+-      ...init,
+-    };
+-  } else {
+-    finalInit = { ...init, headers: new Headers(init?.headers ?? {}) };
+-  }
+-
+-  const finalHeaders = new Headers(finalInit.headers);
+-  for (const [key, value] of Object.entries(additionalHeaders)) {
+-    if (value) finalHeaders.set(key, value);
+-  }
+-  finalInit.headers = finalHeaders;
+-
+-  const prefix = !isSecondPartyUrl(url)
+-    ? isBackend()
+-      ? (process.env.NEXT_PUBLIC_CREATE_BASE_URL ?? 'https://www.create.xyz')
+-      : ''
+-    : '';
+-
+-  try {
+-    const result = await originalFetch(`${prefix}${url}`, finalInit);
+-    if (!result.ok) {
+-      postToParent(
+-        'error',
+-        `Failed to load resource: the server responded with a status of ${result.status} (${result.statusText ?? ''})`,
+-        {
+-          url,
+-          status: result.status,
+-          statusText: result.statusText,
+-        }
+-      );
+-    }
+-    return result;
+-  } catch (error) {
+-    postToParent('error', 'Fetch error', {
+-      url,
+-      error:
+-        error instanceof Error
+-          ? { name: error.name, message: error.message, stack: error.stack }
+-          : error,
+-    });
+-    throw error;
+-  }
+-};
++  init?: RequestInit,
++): Promise<Response> => originalFetch(input, init);
+ 
+ export default fetchWithHeaders;
+diff --git a/global.d.ts b/global.d.ts
+index 61a5da3..ab6e393 100644
+--- a/global.d.ts
++++ b/global.d.ts
+@@ -7,11 +7,3 @@ declare module 'react-router' {
+ 		// add context properties here
+ 	}
+ }
+-declare module 'npm:stripe' {
+-	import Stripe from 'stripe';
+-	export default Stripe;
+-}
+-declare module '@auth/create/react' {
+-	import { SessionProvider } from '@auth/react';
+-	export { SessionProvider };
+-}
+diff --git a/index.ts b/index.ts
+index 1d2d6e1..aaf7322 100644
+--- a/index.ts
++++ b/index.ts
+@@ -7,8 +7,10 @@ import { Pool, neonConfig } from '@neondatabase/serverless';
+ import { hash, verify } from 'argon2';
+ import { Hono } from 'hono';
+ import { contextStorage, getContext } from 'hono/context-storage';
++import { readFile } from 'node:fs/promises';
++import { join } from 'node:path';
++import { fileURLToPath } from 'node:url';
+ import { cors } from 'hono/cors';
+-import { proxy } from 'hono/proxy';
+ import { bodyLimit } from 'hono/body-limit';
+ import { requestId } from 'hono/request-id';
+ import { createHonoServer } from 'react-router-hono-server/node';
+@@ -17,6 +19,7 @@ import ws from 'ws';
+ import NeonAdapter from './adapter';
+ import { getHTMLForErrorPage } from './get-html-for-error-page';
+ import { isAuthAction } from './is-auth-action';
++import { askFeast } from './feast/seedfeast-router.js';
+ import { API_BASENAME, api } from './route-builder';
+ neonConfig.webSocketConstructor = ws;
+ 
+@@ -126,49 +129,6 @@ if (process.env.AUTH_SECRET) {
+         },
+       },
+       providers: [
+-        // Dev-only provider for simulated social sign-in (Google, Facebook, etc.)
+-        // Creates or finds a user by email without requiring a password.
+-        ...(process.env.NEXT_PUBLIC_CREATE_ENV === 'DEVELOPMENT'
+-          ? [
+-              Credentials({
+-                id: 'dev-social',
+-                name: 'Development Social Sign-in',
+-                credentials: {
+-                  email: { label: 'Email', type: 'email' },
+-                  name: { label: 'Name', type: 'text' },
+-                  provider: { label: 'Provider', type: 'text' },
+-                },
+-                authorize: async (credentials) => {
+-                  const { email, name, provider } = credentials;
+-                  if (!email || typeof email !== 'string') return null;
+-
+-                  const existing = await adapter.getUserByEmail(email);
+-                  if (existing) return existing;
+-
+-                  const allowedProviders = new Set(['google', 'facebook', 'twitter', 'apple']);
+-                  const providerName =
+-                    typeof provider === 'string' && allowedProviders.has(provider.toLowerCase())
+-                      ? provider.toLowerCase()
+-                      : 'google';
+-                  const newUser = await adapter.createUser({
+-                    emailVerified: null,
+-                    email,
+-                    name:
+-                      typeof name === 'string' && name.length > 0
+-                        ? name
+-                        : undefined,
+-                  });
+-                  await adapter.linkAccount({
+-                    type: 'oauth',
+-                    userId: newUser.id,
+-                    provider: providerName,
+-                    providerAccountId: `dev-${newUser.id}`,
+-                  });
+-                  return newUser;
+-                },
+-              }),
+-            ]
+-          : []),
+         Credentials({
+           id: 'credentials-signin',
+           name: 'Credentials Sign in',
+@@ -264,25 +224,65 @@ if (process.env.AUTH_SECRET) {
+     }))
+   );
+ }
+-app.all('/integrations/:path{.+}', async (c, next) => {
+-  const queryParams = c.req.query();
+-  const url = `${process.env.NEXT_PUBLIC_CREATE_BASE_URL ?? 'https://www.create.xyz'}/integrations/${c.req.param('path')}${Object.keys(queryParams).length > 0 ? `?${new URLSearchParams(queryParams).toString()}` : ''}`;
++const seedFeastRoot = fileURLToPath(new URL('.', import.meta.url));
++
++app.get('/feast', async (c) => {
++  const html = await readFile(join(seedFeastRoot, 'feast', 'page.html'), 'utf8');
++  return c.html(html);
++});
++
++app.get('/feast/seedfeast-router.js', async (c) => {
++  const source = await readFile(join(seedFeastRoot, 'feast', 'seedfeast-router.js'), 'utf8');
++  return c.body(source, 200, { 'Content-Type': 'text/javascript; charset=utf-8' });
++});
++
++app.get('/vendor/ai-buffer/:file', async (c) => {
++  const file = c.req.param('file');
++  if (!/^[A-Za-z0-9._-]+\.js$/.test(file)) return c.notFound();
++  try {
++    const source = await readFile(join(seedFeastRoot, 'node_modules', 'ai-buffer', 'dist', file));
++    return c.body(source, 200, { 'Content-Type': 'text/javascript; charset=utf-8' });
++  } catch {
++    return c.notFound();
++  }
++});
++
++app.post('/api/feast', async (c) => {
++  let body: { seeds?: unknown; notes?: unknown } = {};
++  try {
++    body = await c.req.json();
++  } catch {
++    return c.json({ error: 'Send the seeds as JSON.' }, 400);
++  }
++  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
++  if (!apiKey) {
++    return c.json(
++      {
++        error:
++          'The server has no OpenRouter key. In the browser, Puter runs first, and a key saved on this device tries Space Bunny Alpha next.',
++      },
++      503,
++    );
++  }
++  try {
++    const result = await askFeast({
++      seeds: typeof body.seeds === 'string' ? body.seeds : '',
++      notes: typeof body.notes === 'string' ? body.notes : '',
++      apiKey,
++      model: process.env.OPENROUTER_MODEL,
++      platform: 'server',
++      timeoutMs: 55_000,
++    });
++    return c.json({ recipe: result.recipe, models: result.models });
++  } catch (error) {
++    const message = error instanceof Error ? error.message : 'SeedFeast could not cook that.';
++    const status = message.includes('seeds or ingredients') ? 400 : 502;
++    return c.json({ error: message }, status);
++  }
++});
+ 
+-  return proxy(url, {
+-    method: c.req.method,
+-    body: c.req.raw.body ?? null,
+-    // @ts-expect-error -- duplex is accepted by the runtime even though the
+-    // type declarations don't include it; required for streaming integrations
+-    duplex: 'half',
+-    redirect: 'manual',
+-    headers: {
+-      ...c.req.header(),
+-      'X-Forwarded-For': process.env.NEXT_PUBLIC_CREATE_HOST,
+-      'x-createxyz-host': process.env.NEXT_PUBLIC_CREATE_HOST,
+-      Host: process.env.NEXT_PUBLIC_CREATE_HOST,
+-      'x-createxyz-project-group-id': process.env.NEXT_PUBLIC_PROJECT_GROUP_ID,
+-    },
+-  });
++app.all('/integrations/:path{.+}', (c) => {
++  return c.json({ error: 'SeedFeast does not forward integration handles or webhooks.' }, 410);
+ });
+ 
+ app.use('/api/auth/*', async (c, next) => {
+diff --git a/package.json b/package.json
+index 3579df3..acd63d3 100644
+--- a/package.json
++++ b/package.json
+@@ -4,7 +4,8 @@
+ 	"type": "module",
+ 	"scripts": {
+ 		"dev": "react-router dev",
+-		"typecheck": "react-router typegen && tsc --noEmit"
++		"typecheck": "react-router typegen && tsc --noEmit",
++		"test": "node --test feast/seedfeast-router.test.mjs feast/handles.test.mjs"
+ 	},
+ 	"dependencies": {
+ 		"@auth/core": "^0.37.2",
+@@ -25,6 +26,7 @@
+ 		"@tanstack/react-table": "^8.21.2",
+ 		"@types/babel__core": "^7.20.5",
+ 		"@vis.gl/react-google-maps": "^0.8.3",
++		"ai-buffer": "github:noahnemo-rgb/ai-buffer-template#d0c7cbc40df991805efaf64223a00fc3fbb72e15",
+ 		"argon2": "^0.43.0",
+ 		"classnames": "^2.5.1",
+ 		"clean-stack": "^5.2.0",
+diff --git a/page.jsx b/page.jsx
+index fa83d19..f803af1 100644
+--- a/page.jsx
++++ b/page.jsx
+@@ -1,147 +1,9 @@
+-'use client';
+-
+-import { signIn } from '@auth/create/react';
+-import { useEffect, useState } from 'react';
+-import { useNavigate } from 'react-router';
+-
+-const isDev = process.env.NEXT_PUBLIC_CREATE_ENV === 'DEVELOPMENT';
+-
+-const PROVIDER_LABELS = {
+-	google: 'Google',
+-	facebook: 'Facebook',
+-	twitter: 'Twitter / X',
+-	apple: 'Apple',
+-};
+-
+-export default function SocialDevShimPage() {
+-	const navigate = useNavigate();
+-
+-	useEffect(() => {
+-		if (!isDev) {
+-			navigate('/');
+-		}
+-	}, [navigate]);
+-
+-	if (!isDev) {
+-		return null;
+-	}
+-
+-	const params =
+-		typeof window !== 'undefined'
+-			? new URLSearchParams(window.location.search)
+-			: new URLSearchParams();
+-	const provider = params.get('provider') || 'google';
+-	const callbackUrl = params.get('callbackUrl') || '/';
+-	const label = PROVIDER_LABELS[provider] || provider;
+-
+-	const [email, setEmail] = useState('');
+-	const [name, setName] = useState('');
+-	const [loading, setLoading] = useState(false);
+-	const [error, setError] = useState(null);
+-	const [missingSecrets, setMissingSecrets] = useState(null);
+-
+-	useEffect(() => {
+-		fetch(
+-			`/api/__create/check-social-secrets?provider=${encodeURIComponent(provider)}`
+-		)
+-			.then((r) => r.json())
+-			.then((data) => setMissingSecrets(data.missing || []))
+-			.catch((err) => {
+-				console.error('Failed to check social secrets:', err);
+-			});
+-	}, [provider]);
+-
+-	const handleSubmit = async (e) => {
+-		e.preventDefault();
+-		setLoading(true);
+-		setError(null);
+-		try {
+-			await signIn('dev-social', { email, name, provider, callbackUrl });
+-		} catch (err) {
+-			setError(
+-				err instanceof Error
+-					? err.message
+-					: 'Sign-in failed. Please try again.'
+-			);
+-			setLoading(false);
+-		}
+-	};
+-
+-	return (
+-		<div className="min-h-screen flex items-center justify-center font-sans bg-gray-100">
+-			<div className="bg-white rounded-xl p-8 w-full max-w-[400px] shadow-md">
+-				<div className="bg-amber-50 border border-amber-400 rounded-lg p-3 mb-4 text-[13px] text-amber-800">
+-					<strong>Development Mode</strong> — This is a simulated{' '}
+-					{label} sign-in. In production, users will see the real{' '}
+-					{label} OAuth screen.
+-				</div>
+-
+-				{error && (
+-					<div className="bg-red-50 border border-red-400 rounded-lg p-3 mb-4 text-[13px] text-red-900">
+-						<strong>Sign-in error</strong> — {error}
+-					</div>
+-				)}
+-
+-				{missingSecrets && missingSecrets.length > 0 && (
+-					<div className="bg-red-50 border border-red-400 rounded-lg p-3 mb-4 text-[13px] text-red-900">
+-						<strong>Missing secrets</strong> — {label} sign-in
+-						won't work in production until you add these secrets to
+-						your project:{' '}
+-						{missingSecrets.map((s) => (
+-							<code
+-								key={s}
+-								className="bg-red-200 px-1 rounded text-[12px]"
+-							>
+-								{s}
+-							</code>
+-						))}
+-					</div>
+-				)}
+-
+-				<h2 className="mt-0 mb-6 text-xl font-semibold">
+-					Sign in with {label}
+-				</h2>
+-
+-				<form onSubmit={handleSubmit}>
+-					<label className="block mb-4">
+-						<span className="block text-sm font-medium mb-1.5">
+-							Email
+-						</span>
+-						<input
+-							type="email"
+-							required
+-							value={email}
+-							onChange={(e) => setEmail(e.target.value)}
+-							placeholder="test@example.com"
+-							className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm"
+-						/>
+-					</label>
+-
+-					<label className="block mb-6">
+-						<span className="block text-sm font-medium mb-1.5">
+-							Display Name{' '}
+-							<span className="text-gray-400">(optional)</span>
+-						</span>
+-						<input
+-							type="text"
+-							value={name}
+-							onChange={(e) => setName(e.target.value)}
+-							placeholder="Test User"
+-							className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm"
+-						/>
+-					</label>
+-
+-					<button
+-						type="submit"
+-						disabled={loading}
+-						className="w-full py-2.5 rounded-lg border-none text-white text-sm font-medium bg-gray-900 hover:bg-gray-800 disabled:bg-gray-400 disabled:cursor-default cursor-pointer"
+-					>
+-						{loading
+-							? 'Signing in...'
+-							: `Continue as ${label} user`}
+-					</button>
+-				</form>
+-			</div>
+-		</div>
+-	);
++export default function SeedFeastHome() {
++  return (
++    <main>
++      <h1>SeedFeast</h1>
++      <p>From seed to gourmet feast.</p>
++      <a href="/feast">Cook with what you have</a>
++    </main>
++  );
+ }
+diff --git a/report-error-to-remote.js b/report-error-to-remote.js
+index 76db7e7..562955a 100644
+--- a/report-error-to-remote.js
++++ b/report-error-to-remote.js
+@@ -1,53 +1,10 @@
+-import { serializeError } from 'serialize-error';
+-
+ export const sendLogsToRemote = async (logs) => {
+-  if (
+-    !process.env.EXPO_PUBLIC_LOGS_ENDPOINT ||
+-    !process.env.EXPO_PUBLIC_PROJECT_GROUP_ID ||
+-    !process.env.EXPO_PUBLIC_CREATE_TEMP_API_KEY
+-  ) {
+-    return { success: false };
+-  }
+-  try {
+-    const response = await fetch(process.env.EXPO_PUBLIC_LOGS_ENDPOINT, {
+-      method: 'POST',
+-      headers: {
+-        'Content-Type': 'application/json',
+-        Authorization: `Bearer ${process.env.EXPO_PUBLIC_CREATE_TEMP_API_KEY}`,
+-      },
+-      body: JSON.stringify({
+-        projectGroupId: process.env.EXPO_PUBLIC_PROJECT_GROUP_ID,
+-        logs,
+-      }),
+-    });
+-    if (!response.ok) {
+-      return { success: false };
+-    }
+-  } catch (fetchError) {
+-    return { success: false, error: fetchError };
+-  }
+-  return { success: true };
++  console.debug("SeedFeast kept logs on this device.", logs);
++  return { success: false };
+ };
+ 
+ export const reportErrorToRemote = async ({ error }) => {
+-  if (
+-    !process.env.EXPO_PUBLIC_LOGS_ENDPOINT ||
+-    !process.env.EXPO_PUBLIC_PROJECT_GROUP_ID ||
+-    !process.env.EXPO_PUBLIC_CREATE_TEMP_API_KEY
+-  ) {
+-    console.debug(
+-      'reportErrorToRemote: Missing environment variables for logging endpoint, project group ID, or API key.',
+-      error
+-    );
+-    return { success: false };
+-  }
+-  return sendLogsToRemote([
+-    {
+-      message: JSON.stringify(serializeError(error)),
+-      timestamp: new Date().toISOString(),
+-      level: 'error',
+-      source: 'BUILDER',
+-      devServerId: process.env.EXPO_PUBLIC_DEV_SERVER_ID,
+-    },
+-  ]);
++  const message = error instanceof Error ? error.message : String(error ?? "");
++  console.debug("SeedFeast kept this error on this device.", message);
++  return { success: false };
+ };
+diff --git a/report-error-to-remote.test.js b/report-error-to-remote.test.js
+index 51def46..b63a6fc 100644
+--- a/report-error-to-remote.test.js
++++ b/report-error-to-remote.test.js
+@@ -1,10 +1,3 @@
+-jest.mock('serialize-error', () => ({
+-  serializeError: jest.fn((err) => ({
+-    message: err instanceof Error ? err.message : String(err),
+-    name: err instanceof Error ? err.name : 'Error',
+-  })),
+-}));
+-
+ let sendLogsToRemote;
+ let reportErrorToRemote;
+ 
+@@ -16,98 +9,37 @@ beforeEach(() => {
+   delete process.env.EXPO_PUBLIC_CREATE_TEMP_API_KEY;
+   delete process.env.EXPO_PUBLIC_DEV_SERVER_ID;
+   global.fetch = jest.fn();
+-
+-  // Re-require after mocks are set up
+-  jest.doMock('serialize-error', () => ({
+-    serializeError: jest.fn((err) => ({
+-      message: err instanceof Error ? err.message : String(err),
+-      name: err instanceof Error ? err.name : 'Error',
+-    })),
+-  }));
+   const mod = require('./report-error-to-remote');
+   sendLogsToRemote = mod.sendLogsToRemote;
+   reportErrorToRemote = mod.reportErrorToRemote;
+ });
+ 
+ describe('sendLogsToRemote', () => {
+-  it('returns success: false when env vars are missing', async () => {
++  it('keeps logs on the device when env vars are missing', async () => {
+     const result = await sendLogsToRemote([{ message: 'test' }]);
+     expect(result).toEqual({ success: false });
+     expect(global.fetch).not.toHaveBeenCalled();
+   });
+ 
+-  it('sends logs to the endpoint with correct auth header', async () => {
+-    process.env.EXPO_PUBLIC_LOGS_ENDPOINT = 'https://logs.test/ingest';
++  it('does not send logs when an external log endpoint is configured', async () => {
++    process.env.EXPO_PUBLIC_LOGS_ENDPOINT = 'https://logs.example/ingest';
+     process.env.EXPO_PUBLIC_PROJECT_GROUP_ID = 'pg-123';
+     process.env.EXPO_PUBLIC_CREATE_TEMP_API_KEY = 'key-abc';
+ 
+-    global.fetch = jest.fn().mockResolvedValue({ ok: true });
+-
+-    const logs = [{ message: 'hello', level: 'info', timestamp: '2026-01-01T00:00:00Z' }];
+-    const result = await sendLogsToRemote(logs);
+-
+-    expect(result).toEqual({ success: true });
+-    expect(global.fetch).toHaveBeenCalledWith('https://logs.test/ingest', {
+-      method: 'POST',
+-      headers: {
+-        'Content-Type': 'application/json',
+-        Authorization: 'Bearer key-abc',
+-      },
+-      body: JSON.stringify({ projectGroupId: 'pg-123', logs }),
+-    });
+-  });
+-
+-  it('returns success: false on non-ok response', async () => {
+-    process.env.EXPO_PUBLIC_LOGS_ENDPOINT = 'https://logs.test/ingest';
+-    process.env.EXPO_PUBLIC_PROJECT_GROUP_ID = 'pg-123';
+-    process.env.EXPO_PUBLIC_CREATE_TEMP_API_KEY = 'key-abc';
+-
+-    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 500 });
+-
+-    const result = await sendLogsToRemote([{ message: 'fail' }]);
++    const result = await sendLogsToRemote([{ message: 'hello' }]);
+     expect(result).toEqual({ success: false });
+-  });
+-
+-  it('returns success: false with error on network failure', async () => {
+-    process.env.EXPO_PUBLIC_LOGS_ENDPOINT = 'https://logs.test/ingest';
+-    process.env.EXPO_PUBLIC_PROJECT_GROUP_ID = 'pg-123';
+-    process.env.EXPO_PUBLIC_CREATE_TEMP_API_KEY = 'key-abc';
+-
+-    const networkError = new Error('Network request failed');
+-    global.fetch = jest.fn().mockRejectedValue(networkError);
+-
+-    const result = await sendLogsToRemote([{ message: 'fail' }]);
+-    expect(result).toEqual({ success: false, error: networkError });
++    expect(global.fetch).not.toHaveBeenCalled();
+   });
+ });
+ 
+ describe('reportErrorToRemote', () => {
+-  it('returns success: false when env vars are missing', async () => {
+-    const result = await reportErrorToRemote({
+-      error: new Error('test error'),
+-    });
+-    expect(result).toEqual({ success: false });
+-    expect(global.fetch).not.toHaveBeenCalled();
+-  });
+-
+-  it('serializes error and sends as a single log entry with source BUILDER', async () => {
+-    process.env.EXPO_PUBLIC_LOGS_ENDPOINT = 'https://logs.test/ingest';
++  it('keeps the error on the device', async () => {
++    process.env.EXPO_PUBLIC_LOGS_ENDPOINT = 'https://logs.example/ingest';
+     process.env.EXPO_PUBLIC_PROJECT_GROUP_ID = 'pg-123';
+     process.env.EXPO_PUBLIC_CREATE_TEMP_API_KEY = 'key-abc';
+-    process.env.EXPO_PUBLIC_DEV_SERVER_ID = 'ds-456';
+-
+-    global.fetch = jest.fn().mockResolvedValue({ ok: true });
+ 
+-    const error = new Error('something broke');
+-    await reportErrorToRemote({ error });
+-
+-    expect(global.fetch).toHaveBeenCalledTimes(1);
+-    const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+-    expect(body.projectGroupId).toBe('pg-123');
+-    expect(body.logs).toHaveLength(1);
+-    expect(body.logs[0].level).toBe('error');
+-    expect(body.logs[0].source).toBe('BUILDER');
+-    expect(body.logs[0].devServerId).toBe('ds-456');
+-    expect(body.logs[0].message).toContain('something broke');
++    const result = await reportErrorToRemote({ error: new Error('something broke') });
++    expect(result).toEqual({ success: false });
++    expect(global.fetch).not.toHaveBeenCalled();
+   });
+ });
+diff --git a/root.tsx b/root.tsx
+index f929394..a302e7b 100644
+--- a/root.tsx
++++ b/root.tsx
+@@ -26,7 +26,7 @@ import './global.css';
+ import { LoadFonts } from 'virtual:load-fonts.jsx';
+ import fetch from '@/__create/fetch';
+ // @ts-expect-error -- generated auth module, no type declarations available
+-import { SessionProvider } from '@auth/create/react';
++import { SessionProvider } from '@hono/auth-js/react';
+ import { toPng } from 'html-to-image';
+ import { useNavigate } from 'react-router';
+ import { serializeError } from 'serialize-error';
+diff --git a/route-builder.ts b/route-builder.ts
+index dc67588..0a154e0 100644
+--- a/route-builder.ts
++++ b/route-builder.ts
+@@ -3,7 +3,7 @@ import { join } from 'node:path';
+ import { fileURLToPath } from 'node:url';
+ import { Hono } from 'hono';
+ import type { Handler } from 'hono/types';
+-import updatedFetch from '../src/__create/fetch';
++import updatedFetch from './fetch';
+ 
+ const API_BASENAME = '/api';
+ const api = new Hono();
+diff --git a/route.js b/route.js
+index 749a3cf..9aba8dd 100644
+--- a/route.js
++++ b/route.js
+@@ -1,24 +1,3 @@
+-const ALLOWED_PROVIDERS = new Set(['google', 'facebook', 'twitter', 'apple']);
+-
+-export function GET(request) {
+-	if (process.env.NEXT_PUBLIC_CREATE_ENV !== 'DEVELOPMENT') {
+-		return Response.json({ error: 'not found' }, { status: 404 });
+-	}
+-
+-	const url = new URL(request.url);
+-	const provider = url.searchParams.get('provider');
+-
+-	if (!provider || !ALLOWED_PROVIDERS.has(provider.toLowerCase())) {
+-		return Response.json({ error: 'invalid provider' }, { status: 400 });
+-	}
+-
+-	const key = provider.toUpperCase();
+-	const clientId = `${key}_CLIENT_ID`;
+-	const clientSecret = `${key}_CLIENT_SECRET`;
+-
+-	const missing = [];
+-	if (!process.env[clientId]) missing.push(clientId);
+-	if (!process.env[clientSecret]) missing.push(clientSecret);
+-
+-	return Response.json({ provider, missing });
++export function GET() {
++  return Response.json({ error: "SeedFeast does not publish integration handles." }, { status: 404 });
+ }
+diff --git a/store.js b/store.js
+index 0814316..a392580 100644
+--- a/store.js
++++ b/store.js
+@@ -1,7 +1,7 @@
+ import { create } from 'zustand';
+ import * as SecureStore from 'expo-secure-store';
+ 
+-export const authKey = `${process.env.EXPO_PUBLIC_PROJECT_GROUP_ID}-jwt`;
++export const authKey = "seedfeast-jwt";
+ 
+ /**
+  * Explicit Keychain options used on every SecureStore call in the auth flow.
+@@ -20,7 +20,7 @@ export const authKey = `${process.env.EXPO_PUBLIC_PROJECT_GROUP_ID}-jwt`;
+  *   NSException and trip iOS 26's unhandled async-void TurboModule rethrow.
+  */
+ export const secureStoreOptions = {
+-  keychainService: 'anything-auth',
++  keychainService: 'seedfeast-auth',
+   keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
+   requireAuthentication: false,
+ };
+diff --git a/stripe.ts b/stripe.ts
+index 5831c20..eb68531 100644
+--- a/stripe.ts
++++ b/stripe.ts
+@@ -1,852 +1,7 @@
+-import lodash from 'lodash';
+-const { partial } = lodash;
+-import regularStripe from 'npm:stripe';
+-import type Stripe from 'stripe';
+-
+-const env = process.env;
+-
+-class StripeError extends Error {
+-  type: string;
+-  param: string;
+-
+-  constructor(message: string, type: string, param: string) {
+-    super(message);
+-    this.type = type;
+-    this.param = param;
+-  }
+-}
+-
+-type SupportedStripeParams =
+-  | Stripe.Checkout.SessionCreateParams
+-  | Stripe.Checkout.SessionListParams
+-  | Stripe.Checkout.SessionRetrieveParams
+-  | Stripe.Checkout.SessionUpdateParams
+-  | Stripe.Checkout.SessionExpireParams
+-  | Stripe.Checkout.SessionListLineItemsParams
+-  | Stripe.ProductCreateParams
+-  | Stripe.ProductUpdateParams
+-  | Stripe.ProductListParams
+-  | Stripe.CustomerCreateParams
+-  | Stripe.CustomerUpdateParams
+-  | Stripe.CustomerListParams
+-  | Stripe.CustomerRetrieveParams
+-  | Stripe.PriceCreateParams
+-  | Stripe.PriceUpdateParams
+-  | Stripe.PriceListParams
+-  | Stripe.PaymentIntentCreateParams
+-  | Stripe.PaymentIntentUpdateParams
+-  | Stripe.PaymentIntentListParams
+-  | Stripe.PaymentIntentConfirmParams
+-  | Stripe.PaymentMethodCreateParams
+-  | Stripe.PaymentMethodAttachParams
+-  | Stripe.PaymentMethodDetachParams
+-  | Stripe.PaymentMethodListParams
+-  | Stripe.SubscriptionCreateParams
+-  | Stripe.SubscriptionUpdateParams
+-  | Stripe.SubscriptionListParams
+-  | Stripe.InvoiceCreateParams
+-  | Stripe.InvoiceUpdateParams
+-  | Stripe.InvoiceListParams
+-  | Stripe.InvoiceFinalizeInvoiceParams
+-  | Stripe.InvoicePayParams
+-  | Stripe.InvoiceVoidInvoiceParams
+-  | Stripe.ChargeCreateParams
+-  | Stripe.ChargeUpdateParams
+-  | Stripe.ChargeListParams
+-  | Stripe.RefundCreateParams
+-  | Stripe.RefundListParams
+-  | Stripe.WebhookEndpointCreateParams
+-  | { id: string };
+-
+-interface MakeStripeRequestParams<T extends SupportedStripeParams> {
+-  path: string;
+-  projectGroupId: string;
+-  token: string;
+-  params: T;
+-}
+-
+-async function makeStripeRequest<T extends SupportedStripeParams>({
+-  path,
+-  projectGroupId,
+-  token,
+-  params,
+-}: MakeStripeRequestParams<T>) {
+-  const result = await fetch(`${env.NEXT_PUBLIC_CREATE_API_BASE_URL}/v0/protected/stripe/${path}`, {
+-    method: 'POST',
+-    headers: {
+-      'Content-Type': 'application/json',
+-    },
+-    body: JSON.stringify({
+-      token,
+-      projectGroupId,
+-      params,
+-      environment: 'DEVELOPMENT',
+-    }),
+-  });
+-  const data = await result.json();
+-  if (!result.ok) {
+-    if (data.error) {
+-      const { message, type, param } = data.error;
+-      throw new StripeError(message, type, param);
+-    }
+-    throw new Error('An error occurred');
+-  }
+-  return data;
+-}
+-
+-async function createCheckoutSession(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.Checkout.SessionCreateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'checkout',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return { url: data.url };
+-}
+-
+-async function listCheckoutSessions(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.Checkout.SessionListParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'checkout/list',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function getCheckoutSession(projectGroupId: string, token: string, id: string) {
+-  const data = await makeStripeRequest({
+-    path: 'checkout/get',
+-    token,
+-    projectGroupId,
+-    params: { id },
+-  });
+-  return data;
+-}
+-
+-async function updateCheckoutSession(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.Checkout.SessionUpdateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'checkout/update',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function expireCheckoutSession(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.Checkout.SessionExpireParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'checkout/expire',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function listCheckoutSessionLineItems(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.Checkout.SessionListLineItemsParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'checkout/line-items',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function createProduct(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.ProductCreateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'products',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function listProducts(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.ProductListParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'products/list',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function getProduct(projectGroupId: string, token: string, id: string) {
+-  const data = await makeStripeRequest({
+-    path: 'products/get',
+-    token,
+-    projectGroupId,
+-    params: { id },
+-  });
+-  return data;
+-}
+-
+-async function updateProduct(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.ProductUpdateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'products/update',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function deleteProduct(projectGroupId: string, token: string, id: string) {
+-  const data = await makeStripeRequest({
+-    path: 'products/delete',
+-    token,
+-    projectGroupId,
+-    params: { id },
+-  });
+-  return data;
+-}
+-
+-async function createPrice(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.PriceCreateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'prices',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function listPrices(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.PriceListParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'prices/list',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function getPrice(projectGroupId: string, token: string, id: string) {
+-  const data = await makeStripeRequest({
+-    path: 'prices/get',
+-    token,
+-    projectGroupId,
+-    params: { id },
+-  });
+-  return data;
+-}
+-
+-async function updatePrice(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.PriceUpdateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'prices/update',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function createCustomer(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.CustomerCreateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'customers',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function listCustomers(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.CustomerListParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'customers/list',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function getCustomer(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.CustomerRetrieveParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'customers/get',
+-    token,
+-    projectGroupId,
+-    params: {
+-      id,
+-      params,
+-    },
+-  });
+-  return data;
+-}
+-
+-async function createPaymentIntent(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.PaymentIntentCreateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'payment-intents',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function listPaymentIntents(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.PaymentIntentListParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'payment-intents/list',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function getPaymentIntent(projectGroupId: string, token: string, id: string) {
+-  const data = await makeStripeRequest({
+-    path: 'payment-intents/get',
+-    token,
+-    projectGroupId,
+-    params: { id },
+-  });
+-  return data;
+-}
+-
+-async function updatePaymentIntent(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.PaymentIntentUpdateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'payment-intents/update',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function confirmPaymentIntent(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.PaymentIntentConfirmParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'payment-intents/confirm',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function cancelPaymentIntent(projectGroupId: string, token: string, id: string) {
+-  const data = await makeStripeRequest({
+-    path: 'payment-intents/cancel',
+-    token,
+-    projectGroupId,
+-    params: { id },
+-  });
+-  return data;
+-}
+-
+-async function createSubscription(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.SubscriptionCreateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'subscriptions',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function listSubscriptions(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.SubscriptionListParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'subscriptions/list',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function getSubscription(projectGroupId: string, token: string, id: string) {
+-  const data = await makeStripeRequest({
+-    path: 'subscriptions/get',
+-    token,
+-    projectGroupId,
+-    params: { id },
+-  });
+-  return data;
+-}
+-
+-async function updateSubscription(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.SubscriptionUpdateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'subscriptions/update',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function cancelSubscription(projectGroupId: string, token: string, id: string) {
+-  const data = await makeStripeRequest({
+-    path: 'subscriptions/cancel',
+-    token,
+-    projectGroupId,
+-    params: { id },
+-  });
+-  return data;
+-}
+-
+-async function createInvoice(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.InvoiceCreateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'invoices',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function listInvoices(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.InvoiceListParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'invoices/list',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function getInvoice(projectGroupId: string, token: string, id: string) {
+-  const data = await makeStripeRequest({
+-    path: 'invoices/get',
+-    token,
+-    projectGroupId,
+-    params: { id },
+-  });
+-  return data;
+-}
+-
+-async function updateInvoice(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.InvoiceUpdateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'invoices/update',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function finalizeInvoice(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.InvoiceFinalizeInvoiceParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'invoices/finalize',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function payInvoice(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.InvoicePayParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'invoices/pay',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function voidInvoice(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.InvoiceVoidInvoiceParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'invoices/void',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function createPaymentMethod(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.PaymentMethodCreateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'payment-methods',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function listPaymentMethods(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.PaymentMethodListParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'payment-methods/list',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function getPaymentMethod(projectGroupId: string, token: string, id: string) {
+-  const data = await makeStripeRequest({
+-    path: 'payment-methods/get',
+-    token,
+-    projectGroupId,
+-    params: { id },
+-  });
+-  return data;
+-}
+-
+-async function attachPaymentMethod(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.PaymentMethodAttachParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'payment-methods/attach',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function detachPaymentMethod(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.PaymentMethodDetachParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'payment-methods/detach',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function createCharge(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.ChargeCreateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'charges',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function listCharges(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.ChargeListParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'charges/list',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function getCharge(projectGroupId: string, token: string, id: string) {
+-  const data = await makeStripeRequest({
+-    path: 'charges/get',
+-    token,
+-    projectGroupId,
+-    params: { id },
+-  });
+-  return data;
+-}
+-
+-async function updateCharge(
+-  projectGroupId: string,
+-  token: string,
+-  id: string,
+-  params: Stripe.ChargeUpdateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'charges/update',
+-    token,
+-    projectGroupId,
+-    params: { id, ...params },
+-  });
+-  return data;
+-}
+-
+-async function createRefund(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.RefundCreateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'refunds',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function listRefunds(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.RefundListParams = {}
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'refunds/list',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-async function getRefund(projectGroupId: string, token: string, id: string) {
+-  const data = await makeStripeRequest({
+-    path: 'refunds/get',
+-    token,
+-    projectGroupId,
+-    params: { id },
+-  });
+-  return data;
+-}
+-
+-async function createWebhookEndpoint(
+-  projectGroupId: string,
+-  token: string,
+-  params: Stripe.WebhookEndpointCreateParams
+-) {
+-  const data = await makeStripeRequest({
+-    path: 'webhooks',
+-    token,
+-    projectGroupId,
+-    params,
+-  });
+-  return data;
+-}
+-
+-interface GetStripeParams {
+-  projectGroupId: string;
+-  token: string;
+-}
+-
+-function getStripe({ projectGroupId, token }: GetStripeParams) {
+-  class StripeClient {
+-    checkout = {
+-      sessions: {
+-        create: (params: Stripe.Checkout.SessionCreateParams) =>
+-          createCheckoutSession(projectGroupId, token, params),
+-        list: partial(listCheckoutSessions, projectGroupId, token),
+-        retrieve: partial(getCheckoutSession, projectGroupId, token),
+-        update: partial(updateCheckoutSession, projectGroupId, token),
+-        expire: partial(expireCheckoutSession, projectGroupId, token),
+-        listLineItems: partial(listCheckoutSessionLineItems, projectGroupId, token),
+-      },
+-    };
+-    products = {
+-      create: partial(createProduct, projectGroupId, token),
+-      list: partial(listProducts, projectGroupId, token),
+-      retrieve: partial(getProduct, projectGroupId, token),
+-      update: partial(updateProduct, projectGroupId, token),
+-      del: partial(deleteProduct, projectGroupId, token),
+-    };
+-    prices = {
+-      create: partial(createPrice, projectGroupId, token),
+-      list: partial(listPrices, projectGroupId, token),
+-      retrieve: partial(getPrice, projectGroupId, token),
+-      update: partial(updatePrice, projectGroupId, token),
+-    };
+-    customers = {
+-      create: partial(createCustomer, projectGroupId, token),
+-      list: partial(listCustomers, projectGroupId, token),
+-      get: partial(getCustomer, projectGroupId, token),
+-      retrieve: partial(getCustomer, projectGroupId, token),
+-    };
+-    paymentIntents = {
+-      create: partial(createPaymentIntent, projectGroupId, token),
+-      list: partial(listPaymentIntents, projectGroupId, token),
+-      retrieve: partial(getPaymentIntent, projectGroupId, token),
+-      update: partial(updatePaymentIntent, projectGroupId, token),
+-      confirm: partial(confirmPaymentIntent, projectGroupId, token),
+-      cancel: partial(cancelPaymentIntent, projectGroupId, token),
+-    };
+-    paymentMethods = {
+-      create: partial(createPaymentMethod, projectGroupId, token),
+-      list: partial(listPaymentMethods, projectGroupId, token),
+-      retrieve: partial(getPaymentMethod, projectGroupId, token),
+-      attach: partial(attachPaymentMethod, projectGroupId, token),
+-      detach: partial(detachPaymentMethod, projectGroupId, token),
+-    };
+-    subscriptions = {
+-      create: partial(createSubscription, projectGroupId, token),
+-      list: partial(listSubscriptions, projectGroupId, token),
+-      retrieve: partial(getSubscription, projectGroupId, token),
+-      update: partial(updateSubscription, projectGroupId, token),
+-      cancel: partial(cancelSubscription, projectGroupId, token),
+-    };
+-    invoices = {
+-      create: partial(createInvoice, projectGroupId, token),
+-      list: partial(listInvoices, projectGroupId, token),
+-      retrieve: partial(getInvoice, projectGroupId, token),
+-      update: partial(updateInvoice, projectGroupId, token),
+-      finalizeInvoice: partial(finalizeInvoice, projectGroupId, token),
+-      pay: partial(payInvoice, projectGroupId, token),
+-      voidInvoice: partial(voidInvoice, projectGroupId, token),
+-    };
+-    charges = {
+-      create: partial(createCharge, projectGroupId, token),
+-      list: partial(listCharges, projectGroupId, token),
+-      retrieve: partial(getCharge, projectGroupId, token),
+-      update: partial(updateCharge, projectGroupId, token),
+-    };
+-    refunds = {
+-      create: partial(createRefund, projectGroupId, token),
+-      list: partial(listRefunds, projectGroupId, token),
+-      retrieve: partial(getRefund, projectGroupId, token),
+-    };
+-    webhookEndpoints = {
+-      create: partial(createWebhookEndpoint, projectGroupId, token),
+-    };
+-  }
+-  return StripeClient;
+-}
+-const hasEnv =
+-  env.CREATE_TEMP_API_KEY &&
+-  env.NEXT_PUBLIC_PROJECT_GROUP_ID &&
+-  env.NEXT_PUBLIC_CREATE_API_BASE_URL;
+-
+-const stripe = hasEnv
+-  ? getStripe({
+-      projectGroupId: env.NEXT_PUBLIC_PROJECT_GROUP_ID,
+-      token: env.CREATE_TEMP_API_KEY,
+-    })
+-  : regularStripe;
+-
+-export default stripe;
+-export { stripe as Stripe };
++/**
++ * Checkout routes construct the official Stripe SDK with STRIPE_SECRET_KEY.
++ * This file used to forward Stripe calls, including webhook creation, through
++ * an external project host. SeedFeast no longer does that.
++ */
++export { default } from "stripe";
++export { default as Stripe } from "stripe";
+diff --git a/upload.js b/upload.js
+index ab8dab3..451f778 100644
+--- a/upload.js
++++ b/upload.js
+@@ -1,37 +1,10 @@
+-async function upload({
+-  url,
+-  buffer,
+-  base64
+-}) {
+-  // Direct API host only. Marketing host (/api/v0/upload on create.xyz /
+-  // anything.com) is behind Vercel bot protection. App-origin hop
+-  // (/_create/api/upload/) is capped at 4MB by Vercel.
+-  const response = await fetch(`https://api.anything.com/v0/upload`, {
+-    method: "POST",
+-    headers: {
+-      "Content-Type": buffer ? "application/octet-stream" : "application/json"
+-    },
+-    body: buffer ? buffer : JSON.stringify({ base64, url })
+-  });
+-  const contentType = response.headers.get("content-type") || "";
+-  if (!contentType.includes("application/json")) {
+-    return {
+-      mimeType: null,
+-      error: "Upload failed (" + response.status + "): non-JSON response from upload service"
+-    };
+-  }
+-  const data = await response.json();
+-  if (!response.ok) {
+-    return {
+-      mimeType: null,
+-      error: data.error || ("Upload failed (" + response.status + ")")
+-    };
+-  }
++async function upload() {
+   return {
+-    url: data.url,
+-    mimeType: data.mimeType || null,
+-    error: data.error
++    url: null,
++    mimeType: null,
++    error: "SeedFeast keeps uploads on this app. The external upload service is disconnected.",
+   };
+ }
++
+ export { upload };
+-export default upload;
+\ No newline at end of file
++export default upload;
+diff --git a/useAuth.js b/useAuth.js
+index a5c1d0a..73a32ed 100644
+--- a/useAuth.js
++++ b/useAuth.js
+@@ -1,17 +1,5 @@
+ import { useCallback } from 'react';
+-import { signIn, signOut } from "@auth/create/react";
+-
+-function isDevIframe() {
+-  try {
+-    return typeof window !== 'undefined' && window.self !== window.top;
+-  } catch { return true; }
+-}
+-
+-function devSocialShim(provider, callbackUrl) {
+-  const params = new URLSearchParams({ provider });
+-  if (callbackUrl) params.set('callbackUrl', callbackUrl);
+-  window.location.href = '/__create/social-dev-shim?' + params;
+-}
++import { signIn, signOut } from "@hono/auth-js/react";
+ 
+ function useAuth() {
+   const callbackUrl = typeof window !== 'undefined'
+@@ -34,22 +22,16 @@ function useAuth() {
+ 
+   const signInWithGoogle = useCallback((options) => {
+     const cb = callbackUrl ?? options?.callbackUrl;
+-    if (isDevIframe()) return devSocialShim("google", cb);
+     return signIn("google", { ...options, callbackUrl: cb });
+   }, [callbackUrl]);
+   const signInWithFacebook = useCallback((options) => {
+-    const cb = options?.callbackUrl;
+-    if (isDevIframe()) return devSocialShim("facebook", cb);
+     return signIn("facebook", options);
+   }, []);
+   const signInWithTwitter = useCallback((options) => {
+-    const cb = options?.callbackUrl;
+-    if (isDevIframe()) return devSocialShim("twitter", cb);
+     return signIn("twitter", options);
+   }, []);
+   const signInWithApple = useCallback((options) => {
+     const cb = callbackUrl ?? options?.callbackUrl;
+-    if (isDevIframe()) return devSocialShim("apple", cb);
+     return signIn("apple", { ...options, callbackUrl: cb });
+   }, [callbackUrl]);
+ 
+diff --git a/useUpload.js b/useUpload.js
+index 35ef306..069b9c7 100644
+--- a/useUpload.js
++++ b/useUpload.js
+@@ -1,66 +1,14 @@
+-import * as React from 'react';
++import * as React from "react";
+ 
+ function useUpload() {
+-  const [loading, setLoading] = React.useState(false);
+-  const upload = React.useCallback(async (input) => {
+-    try {
+-      setLoading(true);
+-      let response;
+-      if ("file" in input && input.file) {
+-        const formData = new FormData();
+-        formData.append("file", input.file);
+-        response = await fetch("/_create/api/upload/", {
+-          method: "POST",
+-          body: formData
+-        });
+-      } else if ("url" in input) {
+-        response = await fetch("/_create/api/upload/", {
+-          method: "POST",
+-          headers: {
+-            "Content-Type": "application/json"
+-          },
+-          body: JSON.stringify({ url: input.url })
+-        });
+-      } else if ("base64" in input) {
+-        response = await fetch("/_create/api/upload/", {
+-          method: "POST",
+-          headers: {
+-            "Content-Type": "application/json"
+-          },
+-          body: JSON.stringify({ base64: input.base64 })
+-        });
+-      } else {
+-        response = await fetch("/_create/api/upload/", {
+-          method: "POST",
+-          headers: {
+-            "Content-Type": "application/octet-stream"
+-          },
+-          body: input.buffer
+-        });
+-      }
+-      if (!response.ok) {
+-        if (response.status === 413) {
+-          throw new Error("Upload failed: File too large.");
+-        }
+-        throw new Error("Upload failed");
+-      }
+-      const data = await response.json();
+-      return { url: data.url, mimeType: data.mimeType || null };
+-    } catch (uploadError) {
+-      if (uploadError instanceof Error) {
+-        return { error: uploadError.message };
+-      }
+-      if (typeof uploadError === "string") {
+-        return { error: uploadError };
+-      }
+-      return { error: "Upload failed" };
+-    } finally {
+-      setLoading(false);
+-    }
++  const upload = React.useCallback(async () => {
++    return {
++      error: "SeedFeast keeps uploads on this app. The external upload service is disconnected.",
++    };
+   }, []);
+ 
+-  return [upload, { loading }];
++  return [upload, { loading: false }];
+ }
+ 
+ export { useUpload };
+-export default useUpload;
+\ No newline at end of file
++export default useUpload;
+diff --git a/useUser.js b/useUser.js
+index 46f612d..d840a7e 100644
+--- a/useUser.js
++++ b/useUser.js
+@@ -1,5 +1,5 @@
+ import * as React from 'react';
+-import { useSession } from "@auth/create/react";
++import { useSession } from "@hono/auth-js/react";
+ 
+ 
+ const useUser = () => {
+diff --git a/vite.config.ts b/vite.config.ts
+index 2a3715b..5d58b5c 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -1,4 +1,3 @@
+-import path from 'node:path';
+ import { reactRouter } from '@react-router/dev/vite';
+ import { reactRouterHonoServer } from 'react-router-hono-server/dev';
+ import { defineConfig } from 'vite';
+@@ -36,7 +35,7 @@ export default defineConfig({
+     nextPublicProcessEnv(),
+     restartEnvFileChange(),
+     reactRouterHonoServer({
+-      serverEntryPoint: './__create/index.ts',
++      serverEntryPoint: './index.ts',
+       runtime: 'node',
+     }),
+     babel({
+@@ -69,10 +68,6 @@ export default defineConfig({
+   resolve: {
+     alias: {
+       lodash: 'lodash-es',
+-      'npm:stripe': 'stripe',
+-      stripe: path.resolve(__dirname, './src/__create/stripe'),
+-      '@auth/create/react': '@hono/auth-js/react',
+-      '@auth/create': path.resolve(__dirname, './src/__create/@auth/create'),
+       '@': path.resolve(__dirname, 'src'),
+     },
+     dedupe: ['react', 'react-dom'],
+-- 
+2.43.0
+

@@ -1,0 +1,662 @@
+From 9e0ee9442b9b49162d4f5e03ac26e1e7b8f6c0cb Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 2 Oct 2026 17:58:13 +0000
+Subject: [PATCH] Route Syntax AI through Space Bunny Alpha, then OpenRouter.
+
+Web chat still starts with Puter. A device key tries stealth/space-bunny-alpha before the saved model. The optional server stream uses the same order.
+---
+ README.md                                   | 10 +--
+ backend/.env.example                        |  3 +-
+ backend/openrouter_chat.py                  | 22 +++++-
+ backend/server.py                           | 32 +++++---
+ backend/tests/test_openrouter_route.py      | 24 ++++++
+ frontend/app/ai.tsx                         |  4 +-
+ frontend/package.json                       |  2 +
+ frontend/src/components/AiSettingsModal.tsx | 40 +++++-----
+ frontend/src/lib/ai-chat.ts                 | 83 ++++++--------------
+ frontend/src/lib/ai-chat.web.ts             | 85 ++++++++-------------
+ frontend/src/lib/syntax-router.js           | 45 +++++++++++
+ frontend/src/lib/syntax-router.test.mjs     | 46 +++++++++++
+ frontend/yarn.lock                          |  4 +
+ 13 files changed, 246 insertions(+), 154 deletions(-)
+ create mode 100644 backend/tests/test_openrouter_route.py
+ create mode 100644 frontend/src/lib/syntax-router.js
+ create mode 100644 frontend/src/lib/syntax-router.test.mjs
+
+diff --git a/README.md b/README.md
+index 6ab3bf7..5a7a4f7 100644
+--- a/README.md
++++ b/README.md
+@@ -64,8 +64,8 @@ Open in Expo Go, an emulator, or press `w` for web. Cloud sync and snippet publi
+ 
+ | Platform | Setup |
+ |----------|--------|
+-| **Web** | Open the AI screen and send a message — sign in to Puter when prompted. Usage is billed to the user's Puter account. |
+-| **iOS / Android** | Tap the gear icon on the AI screen → paste an [OpenRouter](https://openrouter.ai/keys) API key. The key stays on the device and is sent only to OpenRouter. |
++| **Web** | Open the AI screen and send a message — sign in to Puter when prompted. Usage is billed to the user's Puter account. An optional OpenRouter key in settings tries Space Bunny Alpha, then the saved model. |
++| **iOS / Android** | Tap the gear icon on the AI screen → paste an [OpenRouter](https://openrouter.ai/keys) API key. Space Bunny Alpha runs first, then the saved model. The key stays on the device and is sent only to OpenRouter. |
+ 
+ Optional: configure `OPENROUTER_API_KEY` on the server for authenticated `/api/chat/stream`.
+ 
+@@ -91,9 +91,9 @@ Also see `docs/LAPTOP_CHECKLIST.md` and `docs/EAS.md` for EAS builds.
+ | App | Expo / React Native / expo-router |
+ | API | FastAPI + Motor (MongoDB) |
+ | Auth | Email/password accounts, bcrypt hashes, JWT sessions |
+-| AI (web) | [Puter.js](https://docs.puter.com/) — user-pays, no server key |
+-| AI (mobile) | OpenRouter BYOK from device keychain |
+-| AI (optional server) | OpenRouter via `/api/chat/stream` when `OPENROUTER_API_KEY` is set |
++| AI (web) | [Puter.js](https://docs.puter.com/) first, then Space Bunny Alpha when a device key exists |
++| AI (mobile) | Space Bunny Alpha, then OpenRouter BYOK from the device keychain |
++| AI (optional server) | Space Bunny Alpha, then `OPENROUTER_MODEL`, via `/api/chat/stream` when `OPENROUTER_API_KEY` is set |
+ | Runner | Dedicated `runner_app` (Docker `--network=none`) or local process sandbox; per-tier daily run limits |
+ 
+ Projects/files sync **local** (AsyncStorage) or **cloud** (MongoDB, scoped by authenticated `owner_id`). Chat history for client AI is local; server chat (when used) is JWT-scoped.
+diff --git a/backend/.env.example b/backend/.env.example
+index 72ddc7c..bddf69f 100644
+--- a/backend/.env.example
++++ b/backend/.env.example
+@@ -13,7 +13,8 @@ JWT_EXPIRE_DAYS=30
+ REQUIRE_AUTH=true
+ 
+ # OpenRouter (https://openrouter.ai) — optional for server /api/chat/stream
+-# Client AI (Puter web / BYOK mobile) does not need this.
++# The server tries Space Bunny Alpha (stealth/space-bunny-alpha) with this key, then OPENROUTER_MODEL.
++# Client AI (Puter first on web / BYOK on mobile) does not need this.
+ OPENROUTER_API_KEY=
+ # Any OpenRouter model slug, e.g. openai/gpt-4o-mini, anthropic/claude-3.5-sonnet
+ OPENROUTER_MODEL=openai/gpt-4o-mini
+diff --git a/backend/openrouter_chat.py b/backend/openrouter_chat.py
+index 535b490..62e0a47 100644
+--- a/backend/openrouter_chat.py
++++ b/backend/openrouter_chat.py
+@@ -10,6 +10,23 @@ import httpx
+ logger = logging.getLogger(__name__)
+ 
+ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
++SPACE_BUNNY_MODEL = "stealth/space-bunny-alpha"
++FAILOVER_STATUS = {401, 402, 429, 500, 502, 503, 504}
++
++
++class OpenRouterStatus(RuntimeError):
++    def __init__(self, status: int, body: str):
++        super().__init__(f"OpenRouter HTTP {status}: {body[:500]}")
++        self.status = status
++
++
++def model_attempts(model: str) -> List[tuple]:
++    """Space Bunny Alpha first, then the named OpenRouter model. Same key for both."""
++    named = (model or "openai/gpt-4o-mini").strip() or "openai/gpt-4o-mini"
++    plan: List[tuple] = [(SPACE_BUNNY_MODEL, {"reasoning": {"effort": "medium"}})]
++    if named != SPACE_BUNNY_MODEL:
++        plan.append((named, None))
++    return plan
+ 
+ 
+ async def stream_openrouter(
+@@ -20,6 +37,7 @@ async def stream_openrouter(
+     site_url: str = "https://syntax.ide",
+     app_name: str = "Syntax Mobile IDE",
+     timeout_sec: float = 120.0,
++    extra: Optional[Dict] = None,
+ ) -> AsyncIterator[str]:
+     """
+     Yield plain-text content deltas from OpenRouter's OpenAI-compatible SSE stream.
+@@ -35,12 +53,14 @@ async def stream_openrouter(
+         "messages": messages,
+         "stream": True,
+     }
++    if extra:
++        payload.update(extra)
+ 
+     async with httpx.AsyncClient(timeout=timeout_sec) as client:
+         async with client.stream("POST", OPENROUTER_URL, headers=headers, json=payload) as resp:
+             if resp.status_code >= 400:
+                 body = (await resp.aread()).decode("utf-8", errors="replace")
+-                raise RuntimeError(f"OpenRouter HTTP {resp.status_code}: {body[:500]}")
++                raise OpenRouterStatus(resp.status_code, body)
+ 
+             async for line in resp.aiter_lines():
+                 if not line:
+diff --git a/backend/server.py b/backend/server.py
+index 7451b80..b9f4cec 100644
+--- a/backend/server.py
++++ b/backend/server.py
+@@ -23,7 +23,7 @@ from auth_utils import (
+     hash_password,
+     verify_password,
+ )
+-from openrouter_chat import build_messages, stream_openrouter
++from openrouter_chat import FAILOVER_STATUS, OpenRouterStatus, build_messages, model_attempts, stream_openrouter
+ from sandbox_run import run_isolated
+ from snippet_search import (
+     build_snippet_filter,
+@@ -272,7 +272,7 @@ async def root():
+         "chat_provider": "openrouter",
+         "chat_model": OPENROUTER_MODEL,
+         "chat_configured": bool(OPENROUTER_API_KEY),
+-        "ai": "client-side (Puter on web, OpenRouter BYOK on mobile) + optional server OpenRouter",
++        "ai": "client-side (Puter first on web, Space Bunny Alpha then OpenRouter when a key is saved) + optional server Space Bunny Alpha",
+         "auth_required": REQUIRE_AUTH,
+         "runner_url": RUNNER_URL or None,
+         "tiers": {
+@@ -639,16 +639,26 @@ async def chat_stream(payload: ChatRequest, user: AuthUser = Depends(require_use
+ 
+     async def event_gen():
+         full_parts: List[str] = []
++        attempts = model_attempts(OPENROUTER_MODEL)
+         try:
+-            async for delta in stream_openrouter(
+-                api_key=OPENROUTER_API_KEY,
+-                model=OPENROUTER_MODEL,
+-                messages=messages,
+-                site_url=OPENROUTER_SITE_URL,
+-                app_name=OPENROUTER_APP_NAME,
+-            ):
+-                full_parts.append(delta)
+-                yield delta
++            for index, (model, extra) in enumerate(attempts):
++                try:
++                    async for delta in stream_openrouter(
++                        api_key=OPENROUTER_API_KEY,
++                        model=model,
++                        messages=messages,
++                        site_url=OPENROUTER_SITE_URL,
++                        app_name=OPENROUTER_APP_NAME,
++                        extra=extra,
++                    ):
++                        full_parts.append(delta)
++                        yield delta
++                    break
++                except OpenRouterStatus as status_error:
++                    more = index < len(attempts) - 1 and not full_parts and status_error.status in FAILOVER_STATUS
++                    if more:
++                        continue
++                    raise
+ 
+             await db.chat_messages.insert_one(
+                 {
+diff --git a/backend/tests/test_openrouter_route.py b/backend/tests/test_openrouter_route.py
+new file mode 100644
+index 0000000..bc3b004
+--- /dev/null
++++ b/backend/tests/test_openrouter_route.py
+@@ -0,0 +1,24 @@
++"""Space Bunny Alpha sits ahead of the named OpenRouter model. No network."""
++from __future__ import annotations
++
++import unittest
++
++from openrouter_chat import SPACE_BUNNY_MODEL, model_attempts
++
++
++class ModelAttemptsTest(unittest.TestCase):
++    def test_space_bunny_then_named_model(self) -> None:
++        plan = model_attempts("openai/gpt-4o-mini")
++        self.assertEqual(plan[0][0], SPACE_BUNNY_MODEL)
++        self.assertEqual(plan[0][1], {"reasoning": {"effort": "medium"}})
++        self.assertEqual(plan[1], ("openai/gpt-4o-mini", None))
++
++    def test_space_bunny_alone_when_it_is_the_named_model(self) -> None:
++        self.assertEqual(len(model_attempts(SPACE_BUNNY_MODEL)), 1)
++
++    def test_blank_model_uses_the_default_second_route(self) -> None:
++        self.assertEqual(model_attempts("  ")[1][0], "openai/gpt-4o-mini")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/frontend/app/ai.tsx b/frontend/app/ai.tsx
+index cbf5ada..0cc5b52 100644
+--- a/frontend/app/ai.tsx
++++ b/frontend/app/ai.tsx
+@@ -170,9 +170,9 @@ export default function AiScreen() {
+ 
+   const providerHint =
+     Platform.OS === "web"
+-      ? "Powered by Puter — sign in when prompted; usage is on your Puter account."
++      ? "Puter runs first. A key in settings tries Space Bunny Alpha, then your OpenRouter model."
+       : providerReady
+-        ? providerLabel
++        ? "Space Bunny Alpha, then your OpenRouter model. The key stays on this device."
+         : "Add your OpenRouter key in settings to enable AI.";
+ 
+   return (
+diff --git a/frontend/package.json b/frontend/package.json
+index 41fd2ea..05bfd52 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -10,6 +10,7 @@
+     "ios": "expo start --ios",
+     "web": "expo start --web",
+     "lint": "expo lint",
++    "test:ai-buffer": "node --test src/lib/syntax-router.test.mjs",
+     "eas:login": "npx eas-cli login",
+     "eas:init": "npx eas-cli init",
+     "eas:configure": "npx eas-cli update:configure",
+@@ -25,6 +26,7 @@
+     "@gorhom/bottom-sheet": "5.2.14",
+     "@heyputer/puter.js": "2.6.2",
+     "@react-native-async-storage/async-storage": "2.2.0",
++    "ai-buffer": "github:noahnemo-rgb/ai-buffer-template#d0c7cbc40df991805efaf64223a00fc3fbb72e15",
+     "date-fns": "4.1.0",
+     "dayjs": "1.11.13",
+     "expo": "54.0.35",
+diff --git a/frontend/src/components/AiSettingsModal.tsx b/frontend/src/components/AiSettingsModal.tsx
+index 6f4917b..30eee86 100644
+--- a/frontend/src/components/AiSettingsModal.tsx
++++ b/frontend/src/components/AiSettingsModal.tsx
+@@ -51,12 +51,10 @@ export function AiSettingsModal({
+         setProviderLabel(info.label);
+         setProviderDesc(info.description);
+         setProviderReady(info.configured);
+-        if (!isWeb) {
+-          const [savedKey, savedModel] = await Promise.all([openRouterKey.get(), openRouterModel.get()]);
+-          if (savedKey) setApiKey(savedKey);
+-          setKeyLoaded(!!savedKey);
+-          setModel(savedModel);
+-        }
++        const [savedKey, savedModel] = await Promise.all([openRouterKey.get(), openRouterModel.get()]);
++        if (savedKey) setApiKey(savedKey);
++        setKeyLoaded(!!savedKey);
++        setModel(savedModel);
+       } finally {
+         setLoading(false);
+       }
+@@ -146,8 +144,8 @@ export function AiSettingsModal({
+                 <>
+                   <Text style={styles.sectionLabel}>Web — Puter sign-in</Text>
+                   <Text style={styles.help}>
+-                    AI on web uses Puter.js. You may be asked to sign in to your Puter account the first time you send a
+-                    message. Usage is billed to your Puter account, not the app developer.
++                    Puter stays first. You may be asked to sign in the first time you send a message. Usage is billed to
++                    your Puter account, not the app developer.
+                   </Text>
+                   <Pressable
+                     style={[styles.primaryBtn, busy && { opacity: 0.6 }]}
+@@ -161,14 +159,16 @@ export function AiSettingsModal({
+                     <Text style={styles.linkText}>Open puter.com</Text>
+                   </Pressable>
+                 </>
+-              ) : (
+-                <>
+-                  <Text style={styles.sectionLabel}>Mobile — your OpenRouter key</Text>
+-                  <Text style={styles.help}>
+-                    Your API key is stored in the device keychain and sent only to OpenRouter from this app — never to
+-                    our backend.
+-                  </Text>
+-                  <Text style={styles.fieldLabel}>OpenRouter API key</Text>
++              ) : null}
++              <Text style={styles.sectionLabel}>
++                {isWeb ? "Optional key for Space Bunny Alpha" : "Mobile — your OpenRouter key"}
++              </Text>
++              <Text style={styles.help}>
++                {isWeb
++                  ? "A key saved in this browser tries Space Bunny Alpha, then the model below, when Puter cannot answer. The key is not sent to the Syntax server."
++                  : "The key stays in the device keychain. Space Bunny Alpha runs first, then the model below. It is sent only to OpenRouter."}
++              </Text>
++              <Text style={styles.fieldLabel}>OpenRouter API key</Text>
+                   <TextInput
+                     value={apiKey}
+                     onChangeText={setApiKey}
+@@ -204,11 +204,9 @@ export function AiSettingsModal({
+                       <Text style={[styles.linkText, { color: COLORS.error }]}>Remove saved key</Text>
+                     </Pressable>
+                   ) : null}
+-                  <Pressable onPress={() => Linking.openURL("https://openrouter.ai/keys")} style={styles.linkBtn}>
+-                    <Text style={styles.linkText}>Get a key at openrouter.ai/keys</Text>
+-                  </Pressable>
+-                </>
+-              )}
++              <Pressable onPress={() => Linking.openURL("https://openrouter.ai/keys")} style={styles.linkBtn}>
++                <Text style={styles.linkText}>Get a key at openrouter.ai/keys</Text>
++              </Pressable>
+ 
+               {status ? (
+                 <Text style={[styles.status, { color: status.ok ? COLORS.success : COLORS.error }]}>{status.text}</Text>
+diff --git a/frontend/src/lib/ai-chat.ts b/frontend/src/lib/ai-chat.ts
+index 14bf591..86aa0d1 100644
+--- a/frontend/src/lib/ai-chat.ts
++++ b/frontend/src/lib/ai-chat.ts
+@@ -1,81 +1,44 @@
++import { formatAiError, formatCodeContext } from "ai-buffer";
+ import { DEFAULT_OPENROUTER_MODEL, openRouterKey, openRouterModel } from "./ai-keys";
+-import {
+-  buildOpenRouterMessages,
+-  buildUserText,
+-  drainOpenRouterSse,
+-  formatAiError,
+-  type AiProviderInfo,
+-  type StreamAiChatParams,
+-} from "./ai-chat-shared";
+-
+-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+-
+-async function streamOpenRouterXhr(
+-  apiKey: string,
+-  model: string,
+-  messages: { role: string; content: string }[],
+-  onChunk: (text: string) => void,
+-): Promise<string> {
+-  return new Promise((resolve, reject) => {
+-    const xhr = new XMLHttpRequest();
+-    xhr.open("POST", OPENROUTER_URL);
+-    xhr.setRequestHeader("Authorization", `Bearer ${apiKey}`);
+-    xhr.setRequestHeader("Content-Type", "application/json");
+-    xhr.setRequestHeader("HTTP-Referer", "https://syntax.ide");
+-    xhr.setRequestHeader("X-Title", "Syntax Mobile IDE");
+-    let parsedThrough = 0;
+-    let full = "";
+-    xhr.onprogress = () => {
+-      const raw = xhr.responseText ?? "";
+-      const { text, parsedThrough: next } = drainOpenRouterSse(raw, parsedThrough);
+-      parsedThrough = next;
+-      if (text) {
+-        full += text;
+-        onChunk(text);
+-      }
+-    };
+-    xhr.onload = () => {
+-      const raw = xhr.responseText ?? "";
+-      const { text, parsedThrough: next } = drainOpenRouterSse(raw, parsedThrough);
+-      if (text) {
+-        full += text;
+-        onChunk(text);
+-      }
+-      parsedThrough = next;
+-      if (xhr.status >= 200 && xhr.status < 300) resolve(full);
+-      else reject(new Error(`OpenRouter HTTP ${xhr.status}: ${raw.slice(0, 300)}`));
+-    };
+-    xhr.onerror = () => reject(new Error("OpenRouter network error"));
+-    xhr.send(JSON.stringify({ model, messages, stream: true }));
+-  });
+-}
++import { SYSTEM_PROMPT, type AiProviderInfo, type StreamAiChatParams } from "./ai-chat-shared";
++import { createSyntaxRouter } from "./syntax-router.js";
+ 
+ export async function getAiProviderInfo(): Promise<AiProviderInfo> {
+   const key = await openRouterKey.get();
+   const model = await openRouterModel.get();
+   return {
+-    label: "OpenRouter (your key)",
+-    description: key
+-      ? `Using model ${model}. Usage is billed to your OpenRouter account.`
++    label: key?.trim() ? "Space Bunny Alpha" : "OpenRouter (your key)",
++    description: key?.trim()
++      ? `Space Bunny Alpha runs first, then ${model}. The key stays on this device and is never sent to our servers.`
+       : "Add your OpenRouter API key in AI settings. Your key stays on this device and is never sent to our servers.",
+     configured: Boolean(key?.trim()),
+   };
+ }
+ 
+ export async function signInAiProvider(): Promise<void> {
+-  // No-op on native — user configures an API key instead.
++  // Phone setup is the saved key. Puter sign-in is the web build.
+ }
+ 
+ export async function streamAiChat(params: StreamAiChatParams): Promise<string> {
+-  const apiKey = await openRouterKey.get();
+-  if (!apiKey?.trim()) {
++  const apiKey = (await openRouterKey.get())?.trim();
++  if (!apiKey) {
++    throw new Error("OpenRouter API key not set. Open AI settings (gear icon) and add your key.");
++  }
++  const model = (await openRouterModel.get()) || DEFAULT_OPENROUTER_MODEL;
++  const router = createSyntaxRouter({ platform: "native", apiKey, model });
++  if (!router) {
+     throw new Error("OpenRouter API key not set. Open AI settings (gear icon) and add your key.");
+   }
+-  const model = await openRouterModel.get();
+-  const userText = buildUserText(params.message, params.context);
+-  const messages = buildOpenRouterMessages(params.history, userText);
+   try {
+-    return await streamOpenRouterXhr(apiKey, model || DEFAULT_OPENROUTER_MODEL, messages, params.onChunk);
++    return await router.streamChat({
++      message: params.message,
++      history: params.history,
++      systemPrompt: SYSTEM_PROMPT,
++      context: params.context?.code
++        ? formatCodeContext({ code: params.context.code, language: params.context.language })
++        : undefined,
++      onChunk: params.onChunk,
++    });
+   } catch (e) {
+     throw new Error(formatAiError(e));
+   }
+diff --git a/frontend/src/lib/ai-chat.web.ts b/frontend/src/lib/ai-chat.web.ts
+index 70a3259..9678cdb 100644
+--- a/frontend/src/lib/ai-chat.web.ts
++++ b/frontend/src/lib/ai-chat.web.ts
+@@ -1,11 +1,7 @@
+-import {
+-  buildUserText,
+-  formatAiError,
+-  PUTER_DEFAULT_MODEL,
+-  SYSTEM_PROMPT,
+-  type AiProviderInfo,
+-  type StreamAiChatParams,
+-} from "./ai-chat-shared";
++import { formatAiError, formatCodeContext } from "ai-buffer";
++import { openRouterKey, openRouterModel } from "./ai-keys";
++import { SYSTEM_PROMPT, type AiProviderInfo, type StreamAiChatParams } from "./ai-chat-shared";
++import { createSyntaxRouter } from "./syntax-router.js";
+ 
+ type PuterModule = typeof import("@heyputer/puter.js");
+ 
+@@ -14,37 +10,26 @@ async function loadPuter(): Promise<PuterModule["puter"]> {
+   return mod.puter;
+ }
+ 
+-function buildPuterPrompt(history: StreamAiChatParams["history"], userText: string): string {
+-  const lines: string[] = [`System: ${SYSTEM_PROMPT}`];
+-  // Puter single-prompt API — include recent turns as plain text.
+-  const recent = history.slice(-10);
+-  if (recent.length) {
+-    lines.push("Previous conversation:");
+-    for (const turn of recent) {
+-      lines.push(`${turn.role === "user" ? "User" : "Assistant"}: ${turn.content}`);
+-    }
+-    lines.push("");
+-  }
+-  lines.push(`User: ${userText}`);
+-  return lines.join("\n");
+-}
+-
+ export async function getAiProviderInfo(): Promise<AiProviderInfo> {
++  const key = await openRouterKey.get();
++  const keyed = Boolean(key?.trim());
+   try {
+     const puter = await loadPuter();
+-    const signedIn = puter.auth.isSignedIn();
++    const signedIn = Boolean(puter.auth?.isSignedIn?.());
+     return {
+-      label: "Puter (your account)",
++      label: "Puter",
+       description: signedIn
+-        ? "Signed in to Puter. AI usage is billed to your Puter account, not the app developer."
+-        : "Sign in to Puter when prompted. AI usage is billed to your Puter account — no developer API key required.",
+-      configured: signedIn,
++        ? keyed
++          ? "Signed in to Puter. If Puter cannot answer, this browser tries Space Bunny Alpha, then your OpenRouter model."
++          : "Signed in to Puter. AI usage is billed to your Puter account, not the app developer."
++        : "Sign in to Puter when prompted. An optional OpenRouter key on this device tries Space Bunny Alpha after Puter.",
++      configured: signedIn || keyed,
+     };
+   } catch {
+     return {
+-      label: "Puter (your account)",
+-      description: "Sign in to Puter when prompted. AI usage is billed to your Puter account.",
+-      configured: false,
++      label: "Puter",
++      description: "Sign in to Puter when prompted. An optional OpenRouter key tries Space Bunny Alpha after Puter.",
++      configured: keyed,
+     };
+   }
+ }
+@@ -55,30 +40,24 @@ export async function signInAiProvider(): Promise<void> {
+ }
+ 
+ export async function streamAiChat(params: StreamAiChatParams): Promise<string> {
+-  const puter = await loadPuter();
+-  const userText = buildUserText(params.message, params.context);
+-  const prompt = buildPuterPrompt(params.history, userText);
+-  let full = "";
++  const apiKey = await openRouterKey.get();
++  const model = await openRouterModel.get();
++  const router = createSyntaxRouter({
++    platform: "web",
++    apiKey: apiKey ?? "",
++    model,
++    loadPuter,
++  });
+   try {
+-    const stream = await puter.ai.chat(prompt, {
+-      model: PUTER_DEFAULT_MODEL,
+-      stream: true,
++    return await router.streamChat({
++      message: params.message,
++      history: params.history,
++      systemPrompt: SYSTEM_PROMPT,
++      context: params.context?.code
++        ? formatCodeContext({ code: params.context.code, language: params.context.language })
++        : undefined,
++      onChunk: params.onChunk,
+     });
+-    for await (const part of stream as AsyncIterable<{ text?: string; message?: { content?: string } }>) {
+-      const chunk = part?.text ?? part?.message?.content ?? "";
+-      if (chunk) {
+-        full += chunk;
+-        params.onChunk(chunk);
+-      }
+-    }
+-    if (!full) {
+-      // Non-streaming fallback shape
+-      const response = await puter.ai.chat(prompt, { model: PUTER_DEFAULT_MODEL });
+-      const content = (response as { message?: { content?: string } })?.message?.content ?? String(response);
+-      full = content;
+-      if (content) params.onChunk(content);
+-    }
+-    return full;
+   } catch (e) {
+     throw new Error(formatAiError(e));
+   }
+diff --git a/frontend/src/lib/syntax-router.js b/frontend/src/lib/syntax-router.js
+new file mode 100644
+index 0000000..6f6b4c6
+--- /dev/null
++++ b/frontend/src/lib/syntax-router.js
+@@ -0,0 +1,45 @@
++import { createCallRouter } from "ai-buffer";
++
++const APP_NAME = "Syntax Mobile IDE";
++const SITE_URL = "https://syntax.ide";
++const PUTER_MODEL = "openai/gpt-4o-mini";
++
++/**
++ * Web: Puter, then Space Bunny Alpha, then the saved OpenRouter model.
++ * Phone: Space Bunny Alpha, then the saved model. No Puter route.
++ * A missing key leaves the keyed routes off.
++ */
++export function createSyntaxRouter({ platform, apiKey, model, fetchImpl, loadPuter, timeoutMs }) {
++  const key = typeof apiKey === "string" ? apiKey.trim() : "";
++  const named = typeof model === "string" && model.trim() ? model.trim() : PUTER_MODEL;
++  const shared = key
++    ? {
++        getApiKey: () => key,
++        appName: APP_NAME,
++        siteUrl: SITE_URL,
++        transport: platform === "web" ? "fetch" : "xhr",
++        fetchImpl,
++        timeoutMs,
++      }
++    : null;
++
++  if (platform !== "web") {
++    if (!shared) return null;
++    return createCallRouter({
++      spaceBunny: shared,
++      openrouter: { ...shared, model: named },
++      order: ["space-bunny", "openrouter"],
++    });
++  }
++
++  return createCallRouter({
++    puter: { model: PUTER_MODEL, loadPuter, timeoutMs },
++    ...(shared
++      ? {
++          spaceBunny: shared,
++          openrouter: { ...shared, model: named },
++        }
++      : {}),
++    order: ["puter", "space-bunny", "openrouter"],
++  });
++}
+diff --git a/frontend/src/lib/syntax-router.test.mjs b/frontend/src/lib/syntax-router.test.mjs
+new file mode 100644
+index 0000000..e895a86
+--- /dev/null
++++ b/frontend/src/lib/syntax-router.test.mjs
+@@ -0,0 +1,46 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { AiBufferError } from "ai-buffer";
++import { createSyntaxRouter } from "./syntax-router.js";
++
++function sse(text) {
++  const body = `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\ndata: [DONE]\n`;
++  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
++}
++
++test("web tries Puter, then Space Bunny Alpha, then the saved model", async () => {
++  const models = [];
++  const router = createSyntaxRouter({
++    platform: "web",
++    apiKey: "sk-test",
++    model: "openai/gpt-4o-mini",
++    timeoutMs: 1000,
++    loadPuter: async () => {
++      throw new Error("puter signed out");
++    },
++    fetchImpl: async (_input, init) => {
++      const payload = JSON.parse(String(init?.body));
++      models.push(payload.model);
++      if (models.length === 1) return new Response("slow down", { status: 429 });
++      return sse("named");
++    },
++  });
++
++  assert.equal(await router.streamChat({ message: "Explain this function" }), "named");
++  assert.deepEqual(models, ["stealth/space-bunny-alpha", "openai/gpt-4o-mini"]);
++  assert.equal(router.route("puter").id, "puter");
++});
++
++test("phone has no Puter route and starts at Space Bunny Alpha", () => {
++  const router = createSyntaxRouter({
++    platform: "native",
++    apiKey: "sk-test",
++    model: "openai/gpt-4o-mini",
++  });
++  assert.equal(router.route("space-bunny").id, "space-bunny");
++  assert.throws(
++    () => router.route("puter"),
++    (error) => error instanceof AiBufferError && error.code === "provider_error",
++  );
++  assert.equal(createSyntaxRouter({ platform: "native", apiKey: "  " }), null);
++});
+diff --git a/frontend/yarn.lock b/frontend/yarn.lock
+index 10863b6..253d17b 100644
+--- a/frontend/yarn.lock
++++ b/frontend/yarn.lock
+@@ -2317,6 +2317,10 @@ agent-base@^7.1.2:
+   resolved "https://registry.yarnpkg.com/agent-base/-/agent-base-7.1.4.tgz#e3cd76d4c548ee895d3c3fd8dc1f6c5b9032e7a8"
+   integrity sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==
+ 
++"ai-buffer@github:noahnemo-rgb/ai-buffer-template#d0c7cbc40df991805efaf64223a00fc3fbb72e15":
++  version "0.3.0"
++  resolved "https://codeload.github.com/noahnemo-rgb/ai-buffer-template/tar.gz/d0c7cbc40df991805efaf64223a00fc3fbb72e15"
++
+ ajv@^6.12.4, ajv@^6.14.0:
+   version "6.15.0"
+   resolved "https://registry.yarnpkg.com/ajv/-/ajv-6.15.0.tgz#07e982c74626167aa7a2495c53817892d7139492"
+-- 
+2.43.0
+
