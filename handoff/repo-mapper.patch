@@ -1,0 +1,1179 @@
+From f643875e1b20db16c9c1f72720477ff43187d30f Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 2 Oct 2026 17:58:13 +0000
+Subject: [PATCH] Ask about a mapped repo through Space Bunny Alpha, then
+ OpenRouter.
+
+The static page vendors ai-buffer at d0c7cbc. Puter runs first. A browser key tries stealth/space-bunny-alpha, then gpt-4o-mini.
+---
+ README.md                             |   2 +-
+ ai-route.js                           |  56 +++++++
+ ai-route.test.mjs                     |  37 +++++
+ app-static.js                         |  38 +++++
+ index.html                            |  12 +-
+ vendor/ai-buffer/abort.js             |  76 ++++++++++
+ vendor/ai-buffer/client.js            | 205 ++++++++++++++++++++++++++
+ vendor/ai-buffer/errors.js            |  65 ++++++++
+ vendor/ai-buffer/index.js             |  10 ++
+ vendor/ai-buffer/messages.js          |  31 ++++
+ vendor/ai-buffer/openrouter-shared.js |   9 ++
+ vendor/ai-buffer/openrouter-xhr.js    |  79 ++++++++++
+ vendor/ai-buffer/openrouter.js        |  49 ++++++
+ vendor/ai-buffer/puter.js             |  65 ++++++++
+ vendor/ai-buffer/router.js            |  61 ++++++++
+ vendor/ai-buffer/session.js           |  60 ++++++++
+ vendor/ai-buffer/space-bunny.js       |  11 ++
+ vendor/ai-buffer/sse.js               |  69 +++++++++
+ vendor/ai-buffer/store.js             |  52 +++++++
+ vendor/ai-buffer/types.js             |   1 +
+ 20 files changed, 986 insertions(+), 2 deletions(-)
+ create mode 100644 ai-route.js
+ create mode 100644 ai-route.test.mjs
+ create mode 100644 vendor/ai-buffer/abort.js
+ create mode 100644 vendor/ai-buffer/client.js
+ create mode 100644 vendor/ai-buffer/errors.js
+ create mode 100644 vendor/ai-buffer/index.js
+ create mode 100644 vendor/ai-buffer/messages.js
+ create mode 100644 vendor/ai-buffer/openrouter-shared.js
+ create mode 100644 vendor/ai-buffer/openrouter-xhr.js
+ create mode 100644 vendor/ai-buffer/openrouter.js
+ create mode 100644 vendor/ai-buffer/puter.js
+ create mode 100644 vendor/ai-buffer/router.js
+ create mode 100644 vendor/ai-buffer/session.js
+ create mode 100644 vendor/ai-buffer/space-bunny.js
+ create mode 100644 vendor/ai-buffer/sse.js
+ create mode 100644 vendor/ai-buffer/store.js
+ create mode 100644 vendor/ai-buffer/types.js
+
+diff --git a/README.md b/README.md
+index 5beb5a5..beface0 100644
+--- a/README.md
++++ b/README.md
+@@ -51,7 +51,7 @@ repo-mapper-live/
+ └── multiverse.yaml     # Built-in ONE Multiverse manifest
+ ```
+ 
+-**Fully static — no backend required.** All GitHub API calls go directly to `api.github.com` from the browser. AI summary features are available via the companion backend (see below).
++**Fully static — no backend required.** All GitHub API calls go directly to `api.github.com` from the browser. On Key Files, Ask uses [ai-buffer](https://github.com/noahnemo-rgb/ai-buffer-template) pinned at `d0c7cbc`. Puter runs first. An OpenRouter key saved in the browser tries Space Bunny Alpha, then gpt-4o-mini. The key is not stored on a server.
+ 
+ ---
+ 
+diff --git a/ai-route.js b/ai-route.js
+new file mode 100644
+index 0000000..b88c63c
+--- /dev/null
++++ b/ai-route.js
+@@ -0,0 +1,56 @@
++// Pinned to ai-buffer d0c7cbc40df991805efaf64223a00fc3fbb72e15 (Space Bunny Alpha).
++import { createCallRouter } from "./vendor/ai-buffer/index.js";
++
++const SITE = "https://repo-mapper-live-8trm.vercel.app";
++
++export function repoNotes(current) {
++  const repo = current?.repo || {};
++  const files = (current?.critical || [])
++    .slice(0, 4)
++    .map((file) => `${file.path}\n${String(file.snippet || "").slice(0, 500)}`)
++    .join("\n\n");
++  return [
++    `Repo: ${repo.fullName || "unknown"}`,
++    `Description: ${repo.description || ""}`,
++    `Language: ${repo.language || ""}`,
++    "",
++    "Key files:",
++    files,
++  ].join("\n");
++}
++
++/**
++ * Puter first in the browser. A saved key tries Space Bunny Alpha, then gpt-4o-mini.
++ */
++export function createMapperRouter({ apiKey, fetchImpl, loadPuter, timeoutMs }) {
++  const key = typeof apiKey === "string" ? apiKey.trim() : "";
++  const shared = key
++    ? {
++        getApiKey: () => key,
++        appName: "Repo Mapper",
++        siteUrl: SITE,
++        fetchImpl,
++        timeoutMs,
++      }
++    : null;
++  return createCallRouter({
++    puter: { model: "openai/gpt-4o-mini", loadPuter, timeoutMs },
++    ...(shared
++      ? {
++          spaceBunny: shared,
++          openrouter: { ...shared, model: "openai/gpt-4o-mini" },
++        }
++      : {}),
++    order: ["puter", "space-bunny", "openrouter"],
++  });
++}
++
++export async function askMapper({ apiKey, current, question, fetchImpl, loadPuter }) {
++  const router = createMapperRouter({ apiKey, fetchImpl, loadPuter, timeoutMs: 55000 });
++  return router.streamChat({
++    message: question,
++    systemPrompt:
++      "You explain a GitHub repo to the person mapping it. Be concrete and short. Stay with the notes you were given.",
++    context: repoNotes(current),
++  });
++}
+diff --git a/ai-route.test.mjs b/ai-route.test.mjs
+new file mode 100644
+index 0000000..5dffce9
+--- /dev/null
++++ b/ai-route.test.mjs
+@@ -0,0 +1,37 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { askMapper, repoNotes } from "./ai-route.js";
++
++function sse(text) {
++  const body = `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\ndata: [DONE]\n`;
++  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
++}
++
++test("notes name the repo and a key file", () => {
++  const notes = repoNotes({
++    repo: { fullName: "noahnemo-rgb/ONE-repo-mapper-live", description: "Map", language: "JavaScript" },
++    critical: [{ path: "app-static.js", snippet: "const GH_API" }],
++  });
++  assert.match(notes, /ONE-repo-mapper-live/);
++  assert.match(notes, /app-static\.js/);
++});
++
++test("a saved key tries Space Bunny Alpha, then gpt-4o-mini", async () => {
++  const models = [];
++  const text = await askMapper({
++    apiKey: "sk-test",
++    question: "What is the entry file?",
++    current: { repo: { fullName: "owner/repo" }, critical: [] },
++    loadPuter: async () => {
++      throw new Error("puter unavailable");
++    },
++    fetchImpl: async (_input, init) => {
++      const payload = JSON.parse(String(init?.body));
++      models.push(payload.model);
++      if (models.length === 1) return new Response("slow down", { status: 429 });
++      return sse("app-static.js");
++    },
++  });
++  assert.equal(text, "app-static.js");
++  assert.deepEqual(models, ["stealth/space-bunny-alpha", "openai/gpt-4o-mini"]);
++});
+diff --git a/app-static.js b/app-static.js
+index ab67d63..4a133f9 100644
+--- a/app-static.js
++++ b/app-static.js
+@@ -3,6 +3,7 @@
+ // When signed in via GitHub OAuth, the rate limit rises from 60 → 5,000 req/hr.
+ 
+ import * as d3 from 'https://esm.sh/d3@7';
++import { askMapper } from './ai-route.js';
+ 
+ const GH_API = 'https://api.github.com';
+ const $ = (s) => document.querySelector(s);
+@@ -2254,3 +2255,40 @@ function renderMultiverseMap() {
+     },
+   });
+ }
++
++const AI_KEY = 'repomapper_openrouter_key';
++const aiKeyInput = $('#aiKey');
++if (aiKeyInput) {
++  aiKeyInput.value = localStorage.getItem(AI_KEY) || '';
++  aiKeyInput.addEventListener('input', () => {
++    const value = aiKeyInput.value.trim();
++    if (value) localStorage.setItem(AI_KEY, value);
++    else localStorage.removeItem(AI_KEY);
++  });
++}
++$('#aiAskBtn')?.addEventListener('click', async () => {
++  const answer = $('#aiAnswer');
++  const error = $('#aiError');
++  const question = ($('#aiQuestion')?.value || '').trim();
++  if (!CURRENT_REPO) {
++    error.hidden = false;
++    error.textContent = 'Analyze a repo first.';
++    return;
++  }
++  if (!question) return;
++  error.hidden = true;
++  answer.hidden = false;
++  answer.textContent = 'Asking…';
++  try {
++    const text = await askMapper({
++      apiKey: localStorage.getItem(AI_KEY) || '',
++      current: CURRENT_REPO,
++      question,
++    });
++    answer.textContent = text;
++  } catch (err) {
++    answer.hidden = true;
++    error.hidden = false;
++    error.textContent = err?.message || 'The question did not go through.';
++  }
++});
+diff --git a/index.html b/index.html
+index 3994947..8e99a3c 100644
+--- a/index.html
++++ b/index.html
+@@ -136,9 +136,19 @@
+         <div>
+           <h3>Key files</h3>
+           <p class="muted small">Auto-detected high-signal files. Click any file name to view it on GitHub.</p>
+-          <p class="muted small" style="color:#ffd27a">ℹ AI summaries are not available in the static GitHub Pages version.</p>
++          <p class="muted small">Puter runs first in this browser. An OpenRouter key saved here tries Space Bunny Alpha, then gpt-4o-mini. The key stays in this browser.</p>
+         </div>
+       </div>
++      <form id="aiAsk" class="overview-card">
++        <h4>Ask about this repo</h4>
++        <label class="muted small" for="aiKey">OpenRouter key, optional</label>
++        <input id="aiKey" type="password" class="search-input" placeholder="sk-or-..." autocomplete="off" />
++        <label class="muted small" for="aiQuestion">Question</label>
++        <input id="aiQuestion" type="text" class="search-input" placeholder="What should I read first?" />
++        <button id="aiAskBtn" class="btn-secondary" type="button">Ask</button>
++        <p id="aiAnswer" class="summary-text" hidden></p>
++        <p id="aiError" class="error-box" hidden></p>
++      </form>
+       <div id="overviewCard" class="overview-card" hidden>
+         <h4>Architecture overview</h4>
+         <p id="overviewText" class="muted">Not available in static mode.</p>
+diff --git a/vendor/ai-buffer/abort.js b/vendor/ai-buffer/abort.js
+new file mode 100644
+index 0000000..0be0a76
+--- /dev/null
++++ b/vendor/ai-buffer/abort.js
+@@ -0,0 +1,76 @@
++import { AiBufferError } from "./errors.js";
++/** Requests stop on their own after two minutes. Pass `timeoutMs: 0` to wait without a limit. */
++export const DEFAULT_TIMEOUT_MS = 120_000;
++export function startTimeout(ms) {
++    if (ms <= 0) {
++        return { signal: new AbortController().signal, cancel: () => undefined };
++    }
++    const controller = new AbortController();
++    const timer = setTimeout(() => {
++        const error = new Error("The AI request timed out.");
++        error.name = "TimeoutError";
++        controller.abort(error);
++    }, ms);
++    return {
++        signal: controller.signal,
++        cancel: () => clearTimeout(timer),
++    };
++}
++export function anySignal(signals) {
++    const list = signals.filter(Boolean);
++    if (list.length === 0)
++        return new AbortController().signal;
++    if (list.length === 1)
++        return list[0];
++    if (typeof AbortSignal.any === "function")
++        return AbortSignal.any(list);
++    const controller = new AbortController();
++    for (const signal of list) {
++        if (signal.aborted) {
++            controller.abort();
++            break;
++        }
++        signal.addEventListener("abort", () => controller.abort(), { once: true });
++    }
++    return controller.signal;
++}
++export function haltError(input) {
++    if (input.user?.aborted)
++        return new AiBufferError("cancelled", "The AI request was cancelled.");
++    if (input.timeout?.aborted)
++        return new AiBufferError("cancelled", "The AI request timed out.");
++    return undefined;
++}
++/**
++ * Resolves with the work, or rejects when the user cancels or the time limit fires.
++ * The work itself may keep running. Callers stop reading it.
++ */
++export function raceAbort(work, input) {
++    const immediate = haltError(input);
++    if (immediate)
++        return Promise.reject(immediate);
++    return new Promise((resolve, reject) => {
++        let settled = false;
++        const cleanup = () => {
++            input.user?.removeEventListener("abort", onAbort);
++            input.timeout?.removeEventListener("abort", onAbort);
++        };
++        const finish = (fn) => {
++            if (settled)
++                return;
++            settled = true;
++            cleanup();
++            fn();
++        };
++        const onAbort = () => {
++            const error = haltError(input);
++            if (error)
++                finish(() => reject(error));
++        };
++        input.user?.addEventListener("abort", onAbort, { once: true });
++        input.timeout?.addEventListener("abort", onAbort, { once: true });
++        work.then((value) => finish(() => resolve(value)), (error) => finish(() => {
++            reject(haltError(input) ?? error);
++        }));
++    });
++}
+diff --git a/vendor/ai-buffer/client.js b/vendor/ai-buffer/client.js
+new file mode 100644
+index 0000000..425e661
+--- /dev/null
++++ b/vendor/ai-buffer/client.js
+@@ -0,0 +1,205 @@
++import { haltError, raceAbort, startTimeout, DEFAULT_TIMEOUT_MS } from "./abort.js";
++import { AiBufferError, asAiError } from "./errors.js";
++import { buildMessages, buildUserText, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT } from "./messages.js";
++import { streamOpenRouter } from "./openrouter.js";
++import { DEFAULT_SPACE_BUNNY_EFFORT, SPACE_BUNNY_MODEL, spaceBunnyExtra } from "./space-bunny.js";
++import { extractPuterText, isAsyncIterable, loadPuterDefault, puterChunkError } from "./puter.js";
++function requireMessage(params) {
++    if (!params.message.trim() && !params.context?.trim()) {
++        throw new AiBufferError("empty_message", "Message is empty.");
++    }
++}
++function messagesFor(params, defaultSystemPrompt) {
++    requireMessage(params);
++    return buildMessages({
++        systemPrompt: params.systemPrompt ?? defaultSystemPrompt ?? DEFAULT_SYSTEM_PROMPT,
++        history: params.history,
++        userText: buildUserText(params.message, params.context),
++    });
++}
++function resolveTimeout(request, clientDefault) {
++    if (request !== undefined)
++        return request;
++    if (clientDefault !== undefined)
++        return clientDefault;
++    return DEFAULT_TIMEOUT_MS;
++}
++async function readPuterStream(result, params, signals) {
++    let full = "";
++    const push = (text) => {
++        if (!text)
++            return;
++        full += text;
++        params.onChunk?.(text);
++    };
++    if (!isAsyncIterable(result)) {
++        push(extractPuterText(result));
++        return full;
++    }
++    const iterator = result[Symbol.asyncIterator]();
++    while (true) {
++        const step = await raceAbort(iterator.next(), signals);
++        if (step.done)
++            break;
++        const failure = puterChunkError(step.value);
++        if (failure)
++            throw failure;
++        push(extractPuterText(step.value));
++    }
++    return full;
++}
++export function createPuterClient(options = {}) {
++    const loadPuter = options.loadPuter ?? loadPuterDefault;
++    const model = options.model?.trim() || DEFAULT_MODEL;
++    return {
++        id: "puter",
++        async getInfo() {
++            try {
++                const puter = await loadPuter();
++                const signedIn = Boolean(puter.auth?.isSignedIn?.());
++                return {
++                    label: "Puter",
++                    description: signedIn
++                        ? "Signed in to Puter. AI usage is billed to that Puter account."
++                        : "Sign in to Puter when prompted. AI usage is billed to that Puter account.",
++                    configured: signedIn,
++                };
++            }
++            catch {
++                return {
++                    label: "Puter",
++                    description: "Puter runs in the browser. Add the Puter script, or install @heyputer/puter.js, then sign in.",
++                    configured: false,
++                };
++            }
++        },
++        async signIn() {
++            try {
++                const puter = await loadPuter();
++                if (!puter.auth?.signIn) {
++                    throw new Error("This Puter build has no sign-in method.");
++                }
++                await puter.auth.signIn();
++            }
++            catch (error) {
++                throw asAiError(error);
++            }
++        },
++        async streamChat(params) {
++            const timeoutMs = resolveTimeout(params.timeoutMs, options.timeoutMs);
++            const timeout = timeoutMs > 0 ? startTimeout(timeoutMs) : undefined;
++            const signals = { user: params.signal, timeout: timeout?.signal };
++            try {
++                const stopped = haltError(signals);
++                if (stopped)
++                    throw stopped;
++                const puter = await raceAbort(loadPuter(), signals);
++                if (puter.auth?.isSignedIn && !puter.auth.isSignedIn()) {
++                    throw new AiBufferError("signed_out", "Sign in to Puter to send a message.");
++                }
++                if (!puter.ai?.chat) {
++                    throw new Error("Puter.js loaded, but puter.ai.chat is missing.");
++                }
++                const messages = messagesFor(params, options.defaultSystemPrompt);
++                const result = await raceAbort(Promise.resolve(puter.ai.chat(messages, { model, stream: true })), signals);
++                return await readPuterStream(result, params, signals);
++            }
++            catch (error) {
++                throw asAiError(haltError(signals) ?? error);
++            }
++            finally {
++                timeout?.cancel();
++            }
++        },
++    };
++}
++export function createOpenRouterClient(options) {
++    async function resolveModel() {
++        const fromGetter = (await options.getModel?.())?.trim();
++        return fromGetter || options.model?.trim() || DEFAULT_MODEL;
++    }
++    return {
++        id: "openrouter",
++        async getInfo() {
++            const key = (await options.getApiKey())?.trim();
++            const model = await resolveModel();
++            return {
++                label: "OpenRouter",
++                description: key
++                    ? `Using model ${model}. Usage is billed to the OpenRouter account for this key.`
++                    : "Add an OpenRouter API key. On a phone, keep the key on the device. On a server, set OPENROUTER_API_KEY.",
++                configured: Boolean(key),
++            };
++        },
++        async streamChat(params) {
++            const timeoutMs = resolveTimeout(params.timeoutMs, options.timeoutMs);
++            const timeout = timeoutMs > 0 ? startTimeout(timeoutMs) : undefined;
++            const signals = { user: params.signal, timeout: timeout?.signal };
++            try {
++                const stopped = haltError(signals);
++                if (stopped)
++                    throw stopped;
++                const apiKey = (await options.getApiKey())?.trim();
++                if (!apiKey) {
++                    throw new AiBufferError("missing_key", "OpenRouter API key is not set. Add a key on this device, or set OPENROUTER_API_KEY on the server.");
++                }
++                const model = await resolveModel();
++                const messages = messagesFor(params, options.defaultSystemPrompt);
++                return await raceAbort(streamOpenRouter({
++                    apiKey,
++                    model,
++                    messages,
++                    siteUrl: options.siteUrl,
++                    appName: options.appName,
++                    transport: options.transport,
++                    signal: params.signal,
++                    timeoutSignal: timeout?.signal,
++                    onChunk: params.onChunk,
++                    fetchImpl: options.fetchImpl,
++                    extra: options.extra,
++                }), signals);
++            }
++            catch (error) {
++                throw asAiError(haltError(signals) ?? error);
++            }
++            finally {
++                timeout?.cancel();
++            }
++        },
++    };
++}
++export function createSpaceBunnyClient(options) {
++    const effort = options.reasoningEffort ?? DEFAULT_SPACE_BUNNY_EFFORT;
++    const inner = createOpenRouterClient({
++        getApiKey: options.getApiKey,
++        model: SPACE_BUNNY_MODEL,
++        defaultSystemPrompt: options.defaultSystemPrompt,
++        siteUrl: options.siteUrl,
++        appName: options.appName,
++        transport: options.transport,
++        fetchImpl: options.fetchImpl,
++        timeoutMs: options.timeoutMs,
++        extra: spaceBunnyExtra(effort),
++    });
++    return {
++        id: "space-bunny",
++        async getInfo() {
++            const key = (await options.getApiKey())?.trim();
++            return {
++                label: "Space Bunny Alpha",
++                description: key
++                    ? `Calling ${SPACE_BUNNY_MODEL} through OpenRouter. Reasoning effort is ${effort}. The preview does not charge for tokens.`
++                    : "Add an OpenRouter API key. Space Bunny Alpha is requested as stealth/space-bunny-alpha.",
++                configured: Boolean(key),
++            };
++        },
++        streamChat: (params) => inner.streamChat(params),
++    };
++}
++export function createAiClient(options) {
++    if (options.provider === "puter")
++        return createPuterClient(options);
++    if (options.provider === "space-bunny")
++        return createSpaceBunnyClient(options);
++    return createOpenRouterClient(options);
++}
+diff --git a/vendor/ai-buffer/errors.js b/vendor/ai-buffer/errors.js
+new file mode 100644
+index 0000000..a4f0f1d
+--- /dev/null
++++ b/vendor/ai-buffer/errors.js
+@@ -0,0 +1,65 @@
++export class AiBufferError extends Error {
++    code;
++    constructor(code, message) {
++        super(message);
++        this.name = "AiBufferError";
++        this.code = code;
++    }
++}
++export function openRouterHttpError(status, body) {
++    const error = new Error(`OpenRouter HTTP ${status}: ${body.slice(0, 300)}`);
++    error.status = status;
++    return error;
++}
++export function formatAiError(error) {
++    if (error instanceof AiBufferError)
++        return error.message;
++    if (error instanceof Error && error.name === "TimeoutError") {
++        return "The AI request timed out.";
++    }
++    if (error instanceof Error && error.name === "AbortError") {
++        return "The AI request was cancelled.";
++    }
++    const err = error;
++    if (err?.code === "too_many_requests" || err?.status === 429) {
++        return "Too many AI requests. Wait a few seconds and try again.";
++    }
++    if (err?.code === "insufficient_funds" || err?.status === 402) {
++        return "Your AI allowance is exhausted. Add credits or upgrade your provider account, then try again.";
++    }
++    if (err?.code === "subscription_required") {
++        return "This AI feature requires a paid provider plan.";
++    }
++    if (typeof err?.message === "string" && err.message.trim()) {
++        return err.message;
++    }
++    return String(error);
++}
++export function codeFor(error) {
++    if (error instanceof AiBufferError)
++        return error.code;
++    const err = error;
++    if (err?.name === "AbortError" || err?.name === "TimeoutError")
++        return "cancelled";
++    if (err?.code === "too_many_requests" || err?.status === 429)
++        return "rate_limited";
++    if (err?.code === "insufficient_funds" ||
++        err?.code === "subscription_required" ||
++        err?.status === 402) {
++        return "payment_required";
++    }
++    if (err?.code === "signed_out")
++        return "signed_out";
++    if (err?.code === "missing_key")
++        return "missing_key";
++    if (err?.code === "empty_message")
++        return "empty_message";
++    if (err?.code === "busy")
++        return "busy";
++    return "provider_error";
++}
++export function asAiError(error) {
++    if (error instanceof AiBufferError)
++        return error;
++    return new AiBufferError(codeFor(error), formatAiError(error));
++}
+diff --git a/vendor/ai-buffer/index.js b/vendor/ai-buffer/index.js
+new file mode 100644
+index 0000000..1da7f65
+--- /dev/null
++++ b/vendor/ai-buffer/index.js
+@@ -0,0 +1,10 @@
++export { DEFAULT_TIMEOUT_MS } from "./abort.js";
++export { createAiClient, createOpenRouterClient, createPuterClient, createSpaceBunnyClient } from "./client.js";
++export { AiBufferError, asAiError, codeFor, formatAiError } from "./errors.js";
++export { createChatSession } from "./session.js";
++export { buildMessages, buildUserText, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT, formatCodeContext, } from "./messages.js";
++export { createCallRouter } from "./router.js";
++export { DEFAULT_SPACE_BUNNY_EFFORT, SPACE_BUNNY_MODEL, SPACE_BUNNY_REASONING_EFFORTS, spaceBunnyExtra, } from "./space-bunny.js";
++export { OPENROUTER_URL, streamOpenRouter } from "./openrouter.js";
++export { drainOpenRouterSse } from "./sse.js";
++export { createLocalStorageStore, createMemoryStore, createOpenRouterKeyStore } from "./store.js";
+diff --git a/vendor/ai-buffer/messages.js b/vendor/ai-buffer/messages.js
+new file mode 100644
+index 0000000..c67dde9
+--- /dev/null
++++ b/vendor/ai-buffer/messages.js
+@@ -0,0 +1,31 @@
++/** Model id used when a caller does not pass one. Override it per app. */
++export const DEFAULT_MODEL = "openai/gpt-4o-mini";
++export const DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant. When you write code, enclose it in a markdown fence and name the language.";
++const MAX_HISTORY_TURNS = 20;
++export function buildUserText(message, context) {
++    const trimmedContext = context?.trim();
++    if (!trimmedContext)
++        return message;
++    return `${trimmedContext}\n\nUser question: ${message}`;
++}
++/**
++ * Turn an open file into the `context` string for `streamChat`.
++ * Each app decides whether to send code at all.
++ */
++export function formatCodeContext(input) {
++    const maxChars = input.maxChars ?? 4000;
++    const code = input.code.slice(0, maxChars);
++    const language = input.language?.trim() || "unknown";
++    return `[Current file language: ${language}]\n[Current file content]\n\`\`\`\n${code}\n\`\`\``;
++}
++export function buildMessages(input) {
++    const systemPrompt = input.systemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT;
++    const messages = [{ role: "system", content: systemPrompt }];
++    for (const turn of (input.history ?? []).slice(-MAX_HISTORY_TURNS)) {
++        if (turn.content.trim() && (turn.role === "user" || turn.role === "assistant")) {
++            messages.push({ role: turn.role, content: turn.content });
++        }
++    }
++    messages.push({ role: "user", content: input.userText });
++    return messages;
++}
+diff --git a/vendor/ai-buffer/openrouter-shared.js b/vendor/ai-buffer/openrouter-shared.js
+new file mode 100644
+index 0000000..5972cdb
+--- /dev/null
++++ b/vendor/ai-buffer/openrouter-shared.js
+@@ -0,0 +1,9 @@
++export const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
++export function openRouterRequestBody(options) {
++    return JSON.stringify({
++        model: options.model,
++        messages: options.messages,
++        stream: true,
++        ...options.extra,
++    });
++}
+diff --git a/vendor/ai-buffer/openrouter-xhr.js b/vendor/ai-buffer/openrouter-xhr.js
+new file mode 100644
+index 0000000..c4fecea
+--- /dev/null
++++ b/vendor/ai-buffer/openrouter-xhr.js
+@@ -0,0 +1,79 @@
++import { openRouterHttpError } from "./errors.js";
++import { OPENROUTER_URL, openRouterRequestBody } from "./openrouter-shared.js";
++import { drainOpenRouterSse } from "./sse.js";
++function abortError() {
++    const error = new Error("The AI request was cancelled.");
++    error.name = "AbortError";
++    return error;
++}
++/**
++ * React Native's fetch often delivers the body only after it finishes.
++ * XMLHttpRequest `onprogress` is what a phone app uses to show tokens as they arrive.
++ */
++export function streamOpenRouterXhr(options) {
++    if (options.signal?.aborted)
++        return Promise.reject(abortError());
++    const XHR = globalThis.XMLHttpRequest;
++    if (!XHR) {
++        return Promise.reject(new Error('XMLHttpRequest is not available. Use transport: "fetch" in browsers and Node.'));
++    }
++    return new Promise((resolve, reject) => {
++        const xhr = new XHR();
++        xhr.open("POST", OPENROUTER_URL);
++        xhr.setRequestHeader("Authorization", `Bearer ${options.apiKey.trim()}`);
++        xhr.setRequestHeader("Content-Type", "application/json");
++        if (options.siteUrl)
++            xhr.setRequestHeader("HTTP-Referer", options.siteUrl);
++        if (options.appName)
++            xhr.setRequestHeader("X-Title", options.appName);
++        let parsedThrough = 0;
++        let full = "";
++        let settled = false;
++        const fail = (error) => {
++            if (settled)
++                return;
++            settled = true;
++            reject(error instanceof Error ? error : new Error(String(error)));
++        };
++        const succeed = (text) => {
++            if (settled)
++                return;
++            settled = true;
++            resolve(text);
++        };
++        const apply = (raw) => {
++            const drained = drainOpenRouterSse(raw, parsedThrough);
++            parsedThrough = drained.parsedThrough;
++            if (drained.text) {
++                full += drained.text;
++                options.onChunk?.(drained.text);
++            }
++        };
++        xhr.onprogress = () => {
++            try {
++                apply(xhr.responseText ?? "");
++            }
++            catch (error) {
++                fail(error);
++                xhr.abort();
++            }
++        };
++        xhr.onload = () => {
++            try {
++                const raw = xhr.responseText ?? "";
++                apply(raw.endsWith("\n") ? raw : `${raw}\n`);
++                if (xhr.status >= 200 && xhr.status < 300)
++                    succeed(full);
++                else
++                    fail(openRouterHttpError(xhr.status, raw));
++            }
++            catch (error) {
++                fail(error);
++            }
++        };
++        xhr.onerror = () => fail(new Error("OpenRouter network error"));
++        xhr.onabort = () => fail(abortError());
++        options.signal?.addEventListener("abort", () => xhr.abort(), { once: true });
++        xhr.send(openRouterRequestBody(options));
++    });
++}
+diff --git a/vendor/ai-buffer/openrouter.js b/vendor/ai-buffer/openrouter.js
+new file mode 100644
+index 0000000..dfadafe
+--- /dev/null
++++ b/vendor/ai-buffer/openrouter.js
+@@ -0,0 +1,49 @@
++import { anySignal } from "./abort.js";
++import { AiBufferError, openRouterHttpError } from "./errors.js";
++import { readOpenRouterSse } from "./sse.js";
++import { streamOpenRouterXhr } from "./openrouter-xhr.js";
++import { OPENROUTER_URL, openRouterRequestBody } from "./openrouter-shared.js";
++export { OPENROUTER_URL };
++export async function streamOpenRouter(options) {
++    const apiKey = options.apiKey.trim();
++    if (!apiKey) {
++        throw new AiBufferError("missing_key", "OpenRouter API key is not set. Add a key on this device, or set OPENROUTER_API_KEY on the server.");
++    }
++    const signal = combinedSignal(options);
++    const linked = { ...options, signal };
++    if (options.transport === "xhr") {
++        return streamOpenRouterXhr(linked);
++    }
++    return streamOpenRouterFetch(linked);
++}
++function combinedSignal(options) {
++    const parts = [options.signal, options.timeoutSignal].filter((signal) => Boolean(signal));
++    if (parts.length === 0)
++        return undefined;
++    return anySignal(parts);
++}
++async function streamOpenRouterFetch(options) {
++    const fetchImpl = options.fetchImpl ?? fetch;
++    const headers = {
++        Authorization: `Bearer ${options.apiKey.trim()}`,
++        "Content-Type": "application/json",
++    };
++    if (options.siteUrl)
++        headers["HTTP-Referer"] = options.siteUrl;
++    if (options.appName)
++        headers["X-Title"] = options.appName;
++    const response = await fetchImpl(OPENROUTER_URL, {
++        method: "POST",
++        headers,
++        body: openRouterRequestBody(options),
++        signal: options.signal,
++    });
++    if (!response.ok) {
++        const body = await response.text();
++        throw openRouterHttpError(response.status, body);
++    }
++    if (!response.body) {
++        throw new Error("OpenRouter returned an empty response.");
++    }
++    return readOpenRouterSse(response.body, (text) => options.onChunk?.(text));
++}
+diff --git a/vendor/ai-buffer/puter.js b/vendor/ai-buffer/puter.js
+new file mode 100644
+index 0000000..4619332
+--- /dev/null
++++ b/vendor/ai-buffer/puter.js
+@@ -0,0 +1,65 @@
++import { AiBufferError, codeFor } from "./errors.js";
++export async function loadPuterDefault() {
++    const existing = globalThis.puter;
++    if (existing?.ai?.chat)
++        return existing;
++    try {
++        const mod = await import("@heyputer/puter.js");
++        if (mod.puter?.ai?.chat)
++            return mod.puter;
++    }
++    catch {
++        throw new Error('Puter.js is not available. In a browser page, add <script src="https://js.puter.com/v2/"></script> before your app. In a bundler, install @heyputer/puter.js.');
++    }
++    throw new Error("Puter.js loaded, but puter.ai.chat is missing.");
++}
++export function extractPuterText(part) {
++    if (typeof part === "string")
++        return part;
++    if (!part || typeof part !== "object")
++        return "";
++    const chunk = part;
++    if (chunk.type === "reasoning" || chunk.type === "usage" || chunk.type === "error")
++        return "";
++    if (typeof chunk.text === "string" && chunk.text)
++        return chunk.text;
++    const content = chunk.message && typeof chunk.message === "object" ? chunk.message.content : undefined;
++    if (typeof content === "string")
++        return content;
++    if (Array.isArray(content)) {
++        return content
++            .map((block) => {
++            if (typeof block === "string")
++                return block;
++            if (block && typeof block === "object" && "text" in block && typeof block.text === "string") {
++                return block.text;
++            }
++            return "";
++        })
++            .join("");
++    }
++    return "";
++}
++export function puterErrorMessage(part) {
++    if (!part || typeof part !== "object")
++        return undefined;
++    const chunk = part;
++    if (chunk.type !== "error")
++        return undefined;
++    if (typeof chunk.message === "string" && chunk.message.trim())
++        return chunk.message;
++    if (typeof chunk.text === "string" && chunk.text.trim())
++        return chunk.text;
++    return "Puter stream error";
++}
++export function puterChunkError(part) {
++    const message = puterErrorMessage(part);
++    if (!message)
++        return undefined;
++    const code = part && typeof part === "object" && "code" in part ? part.code : undefined;
++    const mapped = codeFor({ code, message });
++    return new AiBufferError(mapped === "provider_error" ? "provider_error" : mapped, message);
++}
++export function isAsyncIterable(value) {
++    return Boolean(value) && typeof value[Symbol.asyncIterator] === "function";
++}
+diff --git a/vendor/ai-buffer/router.js b/vendor/ai-buffer/router.js
+new file mode 100644
+index 0000000..d9fdfac
+--- /dev/null
++++ b/vendor/ai-buffer/router.js
+@@ -0,0 +1,61 @@
++import { createOpenRouterClient, createPuterClient, createSpaceBunnyClient } from "./client.js";
++import { AiBufferError, asAiError } from "./errors.js";
++const FAILOVER_CODES = new Set(["missing_key", "signed_out", "rate_limited", "payment_required", "provider_error"]);
++function canFailover(error) {
++    return error instanceof AiBufferError && FAILOVER_CODES.has(error.code);
++}
++export function createCallRouter(options = {}) {
++    const clients = {};
++    if (options.puter)
++        clients.puter = createPuterClient(options.puter);
++    if (options.openrouter)
++        clients.openrouter = createOpenRouterClient(options.openrouter);
++    if (options.spaceBunny)
++        clients["space-bunny"] = createSpaceBunnyClient(options.spaceBunny);
++    const defaultOrder = (options.order ?? ["space-bunny", "openrouter", "puter"]).filter((id) => clients[id]);
++    return {
++        route(id) {
++            const client = clients[id];
++            if (!client) {
++                throw new AiBufferError("provider_error", `The ${id} route is not configured on this router.`);
++            }
++            return client;
++        },
++        async getInfo() {
++            const info = {};
++            for (const id of Object.keys(clients)) {
++                info[id] = await clients[id].getInfo();
++            }
++            return info;
++        },
++        async streamChat(params) {
++            const { route, order, ...chat } = params;
++            const plan = route ? [route] : order ?? defaultOrder;
++            if (plan.length === 0) {
++                throw new AiBufferError("provider_error", "No call route is configured.");
++            }
++            let last;
++            for (let index = 0; index < plan.length; index += 1) {
++                const id = plan[index];
++                const client = clients[id];
++                if (!client) {
++                    if (route) {
++                        throw new AiBufferError("provider_error", `The ${id} route is not configured on this router.`);
++                    }
++                    continue;
++                }
++                try {
++                    return await client.streamChat(chat);
++                }
++                catch (error) {
++                    const wrapped = asAiError(error);
++                    const more = index < plan.length - 1 && plan.slice(index + 1).some((next) => clients[next]);
++                    if (!canFailover(wrapped) || !more)
++                        throw wrapped;
++                    last = wrapped;
++                }
++            }
++            throw asAiError(last ?? new AiBufferError("provider_error", "No call route is configured."));
++        },
++    };
++}
+diff --git a/vendor/ai-buffer/session.js b/vendor/ai-buffer/session.js
+new file mode 100644
+index 0000000..4f3df34
+--- /dev/null
++++ b/vendor/ai-buffer/session.js
+@@ -0,0 +1,60 @@
++import { anySignal } from "./abort.js";
++import { AiBufferError } from "./errors.js";
++/**
++ * Remembers the conversation for one screen.
++ * A second send while a reply is streaming is rejected. Stop or wait, then send again.
++ * A failed or cancelled send leaves the history as it was.
++ */
++export function createChatSession(client, options = {}) {
++    const turns = [...(options.history ?? [])];
++    let busy = false;
++    let generation = 0;
++    let currentAbort;
++    return {
++        get history() {
++            return turns;
++        },
++        get busy() {
++            return busy;
++        },
++        stop() {
++            currentAbort?.abort();
++        },
++        reset() {
++            generation += 1;
++            currentAbort?.abort();
++            turns.length = 0;
++        },
++        async send(message, sendOptions = {}) {
++            if (busy) {
++                throw new AiBufferError("busy", "A reply is already in progress.");
++            }
++            const gen = generation;
++            const controller = new AbortController();
++            currentAbort = controller;
++            busy = true;
++            try {
++                const signal = sendOptions.signal ? anySignal([sendOptions.signal, controller.signal]) : controller.signal;
++                const reply = await client.streamChat({
++                    message,
++                    history: turns.slice(),
++                    systemPrompt: options.systemPrompt,
++                    context: sendOptions.context,
++                    onChunk: sendOptions.onChunk,
++                    signal,
++                    timeoutMs: sendOptions.timeoutMs,
++                });
++                if (gen === generation) {
++                    turns.push({ role: "user", content: message });
++                    turns.push({ role: "assistant", content: reply });
++                }
++                return reply;
++            }
++            finally {
++                if (currentAbort === controller)
++                    currentAbort = undefined;
++                busy = false;
++            }
++        },
++    };
++}
+diff --git a/vendor/ai-buffer/space-bunny.js b/vendor/ai-buffer/space-bunny.js
+new file mode 100644
+index 0000000..f291c69
+--- /dev/null
++++ b/vendor/ai-buffer/space-bunny.js
+@@ -0,0 +1,11 @@
++import { AiBufferError } from "./errors.js";
++/** OpenRouter model id. OpenRouter forwards this stealth model to its one provider. */
++export const SPACE_BUNNY_MODEL = "stealth/space-bunny-alpha";
++export const SPACE_BUNNY_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
++export const DEFAULT_SPACE_BUNNY_EFFORT = "medium";
++export function spaceBunnyExtra(effort = DEFAULT_SPACE_BUNNY_EFFORT) {
++    if (!SPACE_BUNNY_REASONING_EFFORTS.includes(effort)) {
++        throw new AiBufferError("provider_error", `Reasoning effort must be one of ${SPACE_BUNNY_REASONING_EFFORTS.join(", ")}.`);
++    }
++    return { reasoning: { effort } };
++}
+diff --git a/vendor/ai-buffer/sse.js b/vendor/ai-buffer/sse.js
+new file mode 100644
+index 0000000..d68d2f8
+--- /dev/null
++++ b/vendor/ai-buffer/sse.js
+@@ -0,0 +1,69 @@
++/**
++ * Read complete Server-Sent Events from an accumulated response body.
++ * `parsedThrough` is the index already consumed. Pass the same growing string
++ * on every chunk.
++ */
++export function drainOpenRouterSse(fullText, parsedThrough) {
++    let text = "";
++    const slice = fullText.slice(parsedThrough);
++    const lines = slice.split("\n");
++    // The final array entry is either an unfinished line or the empty string
++    // that split leaves after a trailing newline. Leave it for the next call.
++    const completeLines = lines.slice(0, -1);
++    let consumed = parsedThrough;
++    for (const rawLine of completeLines) {
++        consumed += rawLine.length + 1;
++        const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
++        const trimmed = line.trim();
++        if (!trimmed.startsWith("data:"))
++            continue;
++        const data = trimmed.slice("data:".length).trim();
++        if (!data || data === "[DONE]")
++            continue;
++        let chunk;
++        try {
++            chunk = JSON.parse(data);
++        }
++        catch (error) {
++            if (error instanceof SyntaxError)
++                continue;
++            throw error;
++        }
++        if (chunk.error) {
++            const message = typeof chunk.error === "string" ? chunk.error : chunk.error.message;
++            throw new Error(message || "OpenRouter stream error");
++        }
++        const content = chunk.choices?.[0]?.delta?.content;
++        if (content)
++            text += content;
++    }
++    return { text, parsedThrough: consumed };
++}
++export async function readOpenRouterSse(body, onDelta) {
++    const reader = body.getReader();
++    const decoder = new TextDecoder();
++    let buffered = "";
++    let parsedThrough = 0;
++    let full = "";
++    const take = (flush) => {
++        const source = flush && buffered.length > 0 && !buffered.endsWith("\n") ? `${buffered}\n` : buffered;
++        const drained = drainOpenRouterSse(source, parsedThrough);
++        parsedThrough = drained.parsedThrough;
++        if (flush)
++            buffered = source;
++        if (drained.text) {
++            full += drained.text;
++            onDelta(drained.text);
++        }
++    };
++    while (true) {
++        const { done, value } = await reader.read();
++        if (done)
++            break;
++        buffered += decoder.decode(value, { stream: true });
++        take(false);
++    }
++    buffered += decoder.decode();
++    take(true);
++    return full;
++}
+diff --git a/vendor/ai-buffer/store.js b/vendor/ai-buffer/store.js
+new file mode 100644
+index 0000000..cd908d8
+--- /dev/null
++++ b/vendor/ai-buffer/store.js
+@@ -0,0 +1,52 @@
++import { DEFAULT_MODEL } from "./messages.js";
++export function createMemoryStore(initial = {}) {
++    const values = new Map(Object.entries(initial));
++    return {
++        get: (key) => values.get(key) ?? null,
++        set: (key, value) => {
++            values.set(key, value);
++        },
++        delete: (key) => {
++            values.delete(key);
++        },
++    };
++}
++export function createLocalStorageStore(storage = globalThis.localStorage) {
++    if (!storage) {
++        throw new Error("localStorage is not available. Pass a store, or use createMemoryStore for tests.");
++    }
++    return {
++        get: (key) => storage.getItem(key),
++        set: (key, value) => {
++            storage.setItem(key, value);
++        },
++        delete: (key) => {
++            storage.removeItem(key);
++        },
++    };
++}
++const DEFAULT_KEY_NAME = "ai-buffer.openrouter_key";
++const DEFAULT_MODEL_NAME = "ai-buffer.openrouter_model";
++/**
++ * Saves an OpenRouter key in whatever store the app already has.
++ * Phones can pass expo-secure-store. Browsers can pass localStorage.
++ * The key is never sent anywhere except OpenRouter.
++ */
++export function createOpenRouterKeyStore(store, names) {
++    const keyName = names?.key ?? DEFAULT_KEY_NAME;
++    const modelName = names?.model ?? DEFAULT_MODEL_NAME;
++    return {
++        getKey: async () => {
++            const value = await store.get(keyName);
++            const trimmed = value?.trim();
++            return trimmed ? trimmed : null;
++        },
++        setKey: (value) => Promise.resolve(store.set(keyName, value.trim())),
++        clearKey: () => Promise.resolve(store.delete(keyName)),
++        getModel: async () => {
++            const value = (await store.get(modelName))?.trim();
++            return value || DEFAULT_MODEL;
++        },
++        setModel: (value) => Promise.resolve(store.set(modelName, value.trim())),
++    };
++}
+diff --git a/vendor/ai-buffer/types.js b/vendor/ai-buffer/types.js
+new file mode 100644
+index 0000000..cb0ff5c
+--- /dev/null
++++ b/vendor/ai-buffer/types.js
+@@ -0,0 +1 @@
++export {};
+-- 
+2.43.0
+

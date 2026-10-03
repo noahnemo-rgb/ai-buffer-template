@@ -1,0 +1,3535 @@
+From 18ed92dfc999e835381a83d268539eb855424c58 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 2 Oct 2026 14:18:06 +0000
+Subject: [PATCH 1/2] Add account, community, chat, and Stripe on one API.
+
+The site keeps browser Puter and a visitor's own key as the default heat, and calls ai-buffer for those model requests. A Neon database stores accounts, shared ideas, and chat. Stripe checkout stays off until its secret is set.
+---
+ .env.example                 |  11 +-
+ .vercelignore                |  12 +-
+ README.md                    |  12 +
+ account/signin/page.jsx      |  10 +-
+ account/signup/page.jsx      |   8 +-
+ api/[...path].js             |  12 +
+ chat/page.jsx                | 184 +++++++++++++
+ community/page.jsx           | 178 +++++++++++++
+ hooks/useResultsData.js      |  20 ++
+ package-lock.json            | 504 +++++++++++++++++++++++++++++++++--
+ package.json                 |   4 +-
+ page.jsx                     |  12 +
+ server/forge/handle.js       | 429 +++++++++++++++++++++++++++++
+ server/forge/handle.test.js  | 217 +++++++++++++++
+ server/forge/hono-mount.ts   |  49 ++++
+ server/forge/memory-store.js | 217 +++++++++++++++
+ server/forge/neon-store.js   | 275 +++++++++++++++++++
+ server/forge/node-adapter.js |  97 +++++++
+ server/forge/password.js     |  20 ++
+ server/forge/schema.js       |  73 +++++
+ server/forge/session.js      |  34 +++
+ server/index.ts              |   3 +
+ utils/heat/sipOpenRouter.js  |  44 +--
+ utils/puter-stub.js          |   1 +
+ utils/puterForge.js          |  27 +-
+ utils/useAuth.js             | 111 +++++---
+ utils/useUser.js             |  51 ++--
+ vercel.json                  |   2 +-
+ vite.config.ts               |   6 +
+ 29 files changed, 2486 insertions(+), 137 deletions(-)
+ create mode 100644 api/[...path].js
+ create mode 100644 chat/page.jsx
+ create mode 100644 community/page.jsx
+ create mode 100644 server/forge/handle.js
+ create mode 100644 server/forge/handle.test.js
+ create mode 100644 server/forge/hono-mount.ts
+ create mode 100644 server/forge/memory-store.js
+ create mode 100644 server/forge/neon-store.js
+ create mode 100644 server/forge/node-adapter.js
+ create mode 100644 server/forge/password.js
+ create mode 100644 server/forge/schema.js
+ create mode 100644 server/forge/session.js
+ create mode 100644 utils/puter-stub.js
+
+diff --git a/.env.example b/.env.example
+index 1214df6..ae1c408 100644
+--- a/.env.example
++++ b/.env.example
+@@ -4,21 +4,24 @@
+ # Web origin for this deployment (Vercel sets URL; override if the stamp links break)
+ # APP_ORIGIN=https://your-preview.vercel.app
+ 
+-# Neon — omit on first Preview. API and account routes will fail closed.
++# Neon — required for accounts, saved ideas, community, and chat history.
++# Account cookies do not need AUTH_SECRET. Omit DATABASE_URL and those routes fail closed.
+ # DATABASE_URL=postgresql://USER:PASS@HOST/DB?sslmode=require
+ 
+-# Auth.js — generate a random string for a real preview session later
++# Auth.js — only for the older /api/auth/* actions. The email account system does not use it.
+ # AUTH_SECRET=
+ 
+ # CORS — comma-separated origins if the API is called from another host
+ # CORS_ORIGINS=https://your-preview.vercel.app
+ 
+-# Stripe — keep empty on Preview
++# Stripe — checkout and the webhook stay off until both secrets are set.
++# STRIPE_PRICE_ID optional; without it checkout uses a $19/month price.
+ # STRIPE_SECRET_KEY=
+ # STRIPE_WEBHOOK_SECRET=
+ # STRIPE_PRICE_ID=
+ 
+-# Guest inference (BYOK / product env). Not invited until HITL says so.
++# Optional server fallback for /api/generate and /api/chat.
++# Browser Puter and a key kept in the browser run first. Do not commit a key.
+ # OPENROUTER_API_KEY=
+ 
+ # Partner Gift cashier (Idea Forge only; do not reuse on other products)
+diff --git a/.vercelignore b/.vercelignore
+index 5ce4c38..41deded 100644
+--- a/.vercelignore
++++ b/.vercelignore
+@@ -7,8 +7,16 @@ test/
+ ios/
+ android/
+ 
+-# Pour 1 — Hobby 12-function cap; 26 api routes stay off Vercel
+-api/
++# Legacy route files stay in git. Vercel runs one catch-all: api/[...path].js
++api/auth/
++api/generate/
++api/ideas/
++api/research/
++api/stripe/
++api/trends/
++api/user/
++api/utils/
++api/vitest.config.ts
+ 
+ # Local secrets and noise
+ .env
+diff --git a/README.md b/README.md
+index 5ffbe46..c413e76 100644
+--- a/README.md
++++ b/README.md
+@@ -10,3 +10,15 @@ This product received ONE-trust-colophon on 2026-09-15. Law-as-files: https://gi
+ Footer and /trust wired in P002. Living Seal still later HITL.
+ 
+ P003 stripped Anything preview hooks. Stripe webhook scaffold kept. Stamp kept.
++
++## Accounts, community, chat, and Stripe
++
++One Vercel function, `api/[...path].js`, serves the backend. Set `DATABASE_URL` to a Neon Postgres URL. The first request creates the account, idea, share, comment, vote, and chat tables.
++
++Email and password live at `/api/account/signup` and `/api/account/signin`. The session cookie is `idea_forge_session`. It does not need `AUTH_SECRET`.
++
++Free accounts start with 3 assays a day. Pro skips that counter. Checkout is `/api/stripe/checkout` once `STRIPE_SECRET_KEY` is set. Point Stripe's webhook at `/api/stripe/webhook` with `STRIPE_WEBHOOK_SECRET`.
++
++`/community` lists public ideas. Signed-in partners can publish, vote, and comment. `/chat` tries browser Puter, then an OpenRouter key saved only in that browser, then `OPENROUTER_API_KEY` on the server. Model calls go through [ai-buffer](https://github.com/noahnemo-rgb/ai-buffer-template). The host key is optional. Puter and a visitor's own key stay the default heat.
++
++`npm test` covers the account, credit, community, chat, and Stripe-off paths without calling a model or a database.
+diff --git a/account/signin/page.jsx b/account/signin/page.jsx
+index fd33e13..62beb63 100644
+--- a/account/signin/page.jsx
++++ b/account/signin/page.jsx
+@@ -29,7 +29,7 @@ export default function SignInPage() {
+         redirect: true,
+       });
+     } catch (err) {
+-      setError("Invalid email or password. Please try again.");
++      setError(err.message || "Invalid email or password. Please try again.");
+       setLoading(false);
+     }
+   };
+@@ -115,7 +115,13 @@ export default function SignInPage() {
+           </div>
+ 
+           <button
+-            onClick={() => signInWithGoogle({ callbackUrl: "/" })}
++            onClick={async () => {
++              try {
++                await signInWithGoogle({ callbackUrl: "/" });
++              } catch (err) {
++                setError(err.message || "Google sign-in is not activated. Use email and password.");
++              }
++            }}
+             className="w-full bg-white/5 hover:bg-white/10 border border-white/10 py-4 rounded-2xl font-semibold flex items-center justify-center gap-3 transition-all"
+           >
+             <svg className="w-5 h-5" viewBox="0 0 24 24">
+diff --git a/account/signup/page.jsx b/account/signup/page.jsx
+index bddecdf..30f5d37 100644
+--- a/account/signup/page.jsx
++++ b/account/signup/page.jsx
+@@ -155,7 +155,13 @@ export default function SignUpPage() {
+           </div>
+ 
+           <button
+-            onClick={() => signInWithGoogle({ callbackUrl: "/" })}
++            onClick={async () => {
++              try {
++                await signInWithGoogle({ callbackUrl: "/" });
++              } catch (err) {
++                setError(err.message || "Google sign-in is not activated. Use email and password.");
++              }
++            }}
+             className="w-full bg-white/5 hover:bg-white/10 border border-white/10 py-4 rounded-2xl font-semibold flex items-center justify-center gap-3 transition-all"
+           >
+             <svg className="w-5 h-5" viewBox="0 0 24 24">
+diff --git a/api/[...path].js b/api/[...path].js
+new file mode 100644
+index 0000000..cbd3822
+--- /dev/null
++++ b/api/[...path].js
+@@ -0,0 +1,12 @@
++import { forgeNodeHandler } from "../server/forge/node-adapter.js";
++
++export const config = {
++  api: {
++    bodyParser: false,
++  },
++  maxDuration: 60,
++};
++
++export default function handler(req, res) {
++  return forgeNodeHandler(req, res);
++}
+diff --git a/chat/page.jsx b/chat/page.jsx
+new file mode 100644
+index 0000000..2a88a13
+--- /dev/null
++++ b/chat/page.jsx
+@@ -0,0 +1,184 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import { ArrowLeft, Send, Sparkles } from "lucide-react";
++import { createAiClient } from "ai-buffer";
++import { FORGE_VISITOR_PUTER } from "@/utils/heat/flags";
++import { loadPuter } from "@/utils/puterForge";
++import useUser from "@/utils/useUser";
++
++const KEY_NAME = "ideaforge_openrouter_key";
++const CHAT_PROMPT =
++  "You are the Idea Forge assistant. Help the partner think through one business idea. Be concrete and short. When you suggest a next step, say whether the human or a named helper does it.";
++
++async function logTurn(role, content) {
++  await fetch("/api/chat/log", {
++    method: "POST",
++    headers: { "Content-Type": "application/json" },
++    credentials: "include",
++    body: JSON.stringify({ role, content }),
++  });
++}
++
++export default function ChatPage() {
++  const { data: user } = useUser();
++  const [messages, setMessages] = useState([]);
++  const [draft, setDraft] = useState("");
++  const [key, setKey] = useState("");
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState(null);
++
++  useEffect(() => {
++    if (typeof window !== "undefined") setKey(localStorage.getItem(KEY_NAME) || "");
++  }, []);
++
++  useEffect(() => {
++    if (!user) return;
++    fetch("/api/chat", { credentials: "include" })
++      .then((response) => (response.ok ? response.json() : { messages: [] }))
++      .then((data) => setMessages(Array.isArray(data.messages) ? data.messages : []))
++      .catch(() => {});
++  }, [user]);
++
++  const saveKey = (value) => {
++    setKey(value);
++    if (value.trim()) localStorage.setItem(KEY_NAME, value.trim());
++    else localStorage.removeItem(KEY_NAME);
++  };
++
++  const askLocal = async (message, history) => {
++    if (FORGE_VISITOR_PUTER) {
++      const ai = createAiClient({
++        provider: "puter",
++        model: "openai/gpt-5-nano",
++        loadPuter,
++        defaultSystemPrompt: CHAT_PROMPT,
++      });
++      const info = await ai.getInfo();
++      if (!info.configured) await ai.signIn();
++      return ai.streamChat({ message, history, systemPrompt: CHAT_PROMPT });
++    }
++    return null;
++  };
++
++  const askKey = async (message, history) => {
++    const apiKey = key.trim();
++    if (!apiKey) return null;
++    const ai = createAiClient({
++      provider: "openrouter",
++      getApiKey: () => apiKey,
++      appName: "Idea Forge",
++      siteUrl: window.location.origin,
++    });
++    return ai.streamChat({ message, history, systemPrompt: CHAT_PROMPT });
++  };
++
++  const onSubmit = async (event) => {
++    event.preventDefault();
++    const message = draft.trim();
++    if (!message || busy) return;
++    const history = messages.map((row) => ({ role: row.role, content: row.content }));
++    setMessages((current) => [...current, { role: "user", content: message }]);
++    setDraft("");
++    setBusy(true);
++    setError(null);
++    try {
++      let reply = null;
++      try {
++        reply = await askLocal(message, history);
++      } catch (puterError) {
++        console.warn("Puter chat unavailable", puterError);
++      }
++      if (!reply) reply = await askKey(message, history);
++      if (reply) {
++        if (user) {
++          await logTurn("user", message);
++          await logTurn("assistant", reply);
++        }
++      } else {
++        const response = await fetch("/api/chat", {
++          method: "POST",
++          headers: { "Content-Type": "application/json" },
++          credentials: "include",
++          body: JSON.stringify({ message, history }),
++        });
++        const data = await response.json().catch(() => ({}));
++        if (!response.ok) throw new Error(data.error || "Chat is not available yet.");
++        reply = data.reply;
++      }
++      setMessages((current) => [...current, { role: "assistant", content: reply }]);
++    } catch (err) {
++      setError(err.message || "Chat failed.");
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  return (
++    <div className="min-h-screen bg-[#0F0A18] text-white font-sans">
++      <nav className="border-b border-white/10 px-6 py-4 flex justify-between items-center max-w-3xl mx-auto">
++        <a href="/" className="flex items-center gap-3">
++          <ArrowLeft size={18} />
++          <span className="font-bold">IdeaForge</span>
++        </a>
++        <a href="/community" className="text-sm text-white/60 hover:text-white">
++          Community
++        </a>
++      </nav>
++      <main className="max-w-3xl mx-auto px-6 py-10">
++        <div className="flex items-center gap-3 mb-6">
++          <div className="w-10 h-10 bg-[#6855FF] rounded-xl flex items-center justify-center">
++            <Sparkles size={18} />
++          </div>
++          <div>
++            <h1 className="text-3xl font-bold">Chat</h1>
++            <p className="text-white/50 text-sm">
++              Puter in the browser, your own OpenRouter key, or the server key if one is set.
++            </p>
++          </div>
++        </div>
++        <label className="block text-sm text-white/60 mb-6">
++          OpenRouter key, stored only in this browser
++          <input
++            type="password"
++            value={key}
++            onChange={(event) => saveKey(event.target.value)}
++            placeholder="sk-or-..."
++            className="mt-2 w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 outline-none focus:border-[#6855FF]"
++          />
++        </label>
++        <div className="space-y-4 mb-6 min-h-48">
++          {messages.length === 0 && (
++            <p className="text-white/40">Ask about one idea. Sign in if you want the thread saved.</p>
++          )}
++          {messages.map((row, index) => (
++            <div
++              key={`${row.role}-${index}`}
++              className={`rounded-2xl px-4 py-3 ${row.role === "user" ? "bg-[#6855FF]/20 ml-8" : "bg-white/5 mr-8"}`}
++            >
++              <p className="text-xs uppercase tracking-wide text-white/40 mb-1">{row.role}</p>
++              <p className="whitespace-pre-wrap">{row.content}</p>
++            </div>
++          ))}
++        </div>
++        {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
++        <form onSubmit={onSubmit} className="flex gap-3">
++          <input
++            value={draft}
++            onChange={(event) => setDraft(event.target.value)}
++            placeholder="What should we assay?"
++            className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-4 py-3 outline-none focus:border-[#6855FF]"
++          />
++          <button
++            type="submit"
++            disabled={busy}
++            className="bg-[#6855FF] hover:bg-[#5444D1] disabled:opacity-50 px-5 rounded-2xl font-bold flex items-center gap-2"
++          >
++            <Send size={16} />
++            {busy ? "..." : "Send"}
++          </button>
++        </form>
++      </main>
++    </div>
++  );
++}
+diff --git a/community/page.jsx b/community/page.jsx
+new file mode 100644
+index 0000000..b4b5252
+--- /dev/null
++++ b/community/page.jsx
+@@ -0,0 +1,178 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import { ArrowLeft, MessageSquare, Sparkles } from "lucide-react";
++import useUser from "@/utils/useUser";
++
++export default function CommunityPage() {
++  const { data: user } = useUser();
++  const [ideas, setIdeas] = useState([]);
++  const [mine, setMine] = useState([]);
++  const [error, setError] = useState(null);
++  const [comment, setComment] = useState({});
++  const [openComments, setOpenComments] = useState({});
++
++  const load = async () => {
++    const response = await fetch("/api/community");
++    const data = await response.json().catch(() => ({}));
++    if (!response.ok) {
++      setError(data.error || "Community is offline until the database is connected.");
++      setIdeas([]);
++      return;
++    }
++    setError(null);
++    setIdeas(data.ideas || []);
++    if (user) {
++      const own = await fetch("/api/ideas", { credentials: "include" });
++      const ownData = await own.json().catch(() => ({ ideas: [] }));
++      setMine((ownData.ideas || []).filter((idea) => idea.visibility !== "public"));
++    }
++  };
++
++  useEffect(() => {
++    load().catch(() => setError("Community is offline until the database is connected."));
++  }, [user]);
++
++  const publish = async (ideaId) => {
++    const response = await fetch("/api/ideas", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      credentials: "include",
++      body: JSON.stringify({ action: "publish", ideaId }),
++    });
++    if (!response.ok) {
++      const data = await response.json().catch(() => ({}));
++      setError(data.error || "Could not publish.");
++      return;
++    }
++    await load();
++  };
++
++  const vote = async (ideaId) => {
++    const response = await fetch("/api/ideas", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      credentials: "include",
++      body: JSON.stringify({ action: "vote", ideaId }),
++    });
++    if (response.status === 401) {
++      window.location.href = "/account/signin?callbackUrl=/community";
++      return;
++    }
++    await load();
++  };
++
++  const showComments = async (ideaId) => {
++    const response = await fetch(`/api/ideas/comments?ideaId=${encodeURIComponent(ideaId)}`);
++    const data = await response.json().catch(() => ({ comments: [] }));
++    setOpenComments((current) => ({ ...current, [ideaId]: data.comments || [] }));
++  };
++
++  const sendComment = async (ideaId) => {
++    const content = (comment[ideaId] || "").trim();
++    if (!content) return;
++    const response = await fetch("/api/ideas/comments", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      credentials: "include",
++      body: JSON.stringify({ ideaId, content }),
++    });
++    if (response.status === 401) {
++      window.location.href = "/account/signin?callbackUrl=/community";
++      return;
++    }
++    setComment((current) => ({ ...current, [ideaId]: "" }));
++    await showComments(ideaId);
++  };
++
++  return (
++    <div className="min-h-screen bg-[#0F0A18] text-white font-sans">
++      <nav className="border-b border-white/10 px-6 py-4 flex justify-between items-center max-w-4xl mx-auto">
++        <a href="/" className="flex items-center gap-3">
++          <ArrowLeft size={18} />
++          <span className="font-bold">IdeaForge</span>
++        </a>
++        <a href="/chat" className="text-sm text-white/60 hover:text-white">
++          Chat
++        </a>
++      </nav>
++      <main className="max-w-4xl mx-auto px-6 py-10">
++        <div className="flex items-center gap-3 mb-8">
++          <div className="w-10 h-10 bg-[#6855FF] rounded-xl flex items-center justify-center">
++            <Sparkles size={18} />
++          </div>
++          <div>
++            <h1 className="text-3xl font-bold">Community</h1>
++            <p className="text-white/50 text-sm">Public assays. Sign in to publish, vote, or comment.</p>
++          </div>
++        </div>
++        {error && <p className="text-red-400 mb-6">{error}</p>}
++        {user && mine.length > 0 && (
++          <section className="mb-10">
++            <h2 className="text-lg font-bold mb-3">Publish one of yours</h2>
++            <ul className="space-y-2">
++              {mine.map((idea) => (
++                <li key={idea.id} className="flex items-center justify-between bg-white/5 rounded-2xl px-4 py-3">
++                  <span>{idea.title}</span>
++                  <button
++                    onClick={() => publish(idea.id)}
++                    className="text-sm bg-[#6855FF] px-3 py-1.5 rounded-full font-semibold"
++                  >
++                    Publish
++                  </button>
++                </li>
++              ))}
++            </ul>
++          </section>
++        )}
++        <ul className="space-y-4">
++          {ideas.length === 0 && !error && <li className="text-white/40">No public ideas yet.</li>}
++          {ideas.map((idea) => (
++            <li key={idea.id} className="bg-[#1A1425] border border-white/10 rounded-3xl p-6">
++              <h2 className="text-xl font-bold">{idea.title}</h2>
++              <p className="text-white/60 mt-2">{idea.description}</p>
++              <p className="text-xs text-white/40 mt-3">{idea.user_name || idea.owner_email || "Partner"}</p>
++              <div className="flex gap-3 mt-4">
++                <button onClick={() => vote(idea.id)} className="text-sm border border-white/10 px-3 py-1.5 rounded-full">
++                  Vote ({idea.vote_count || 0})
++                </button>
++                <button
++                  onClick={() => showComments(idea.id)}
++                  className="text-sm border border-white/10 px-3 py-1.5 rounded-full flex items-center gap-2"
++                >
++                  <MessageSquare size={14} />
++                  Comments
++                </button>
++              </div>
++              {openComments[idea.id] && (
++                <div className="mt-4 space-y-2">
++                  {openComments[idea.id].map((row) => (
++                    <p key={row.id} className="text-sm text-white/80">
++                      <span className="text-white/40">{row.user_name}: </span>
++                      {row.content}
++                    </p>
++                  ))}
++                  <form
++                    className="flex gap-2"
++                    onSubmit={(event) => {
++                      event.preventDefault();
++                      sendComment(idea.id);
++                    }}
++                  >
++                    <input
++                      value={comment[idea.id] || ""}
++                      onChange={(event) => setComment((current) => ({ ...current, [idea.id]: event.target.value }))}
++                      className="flex-1 bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm outline-none"
++                      placeholder="Add a comment"
++                    />
++                    <button className="text-sm bg-white/10 px-3 rounded-xl">Send</button>
++                  </form>
++                </div>
++              )}
++            </li>
++          ))}
++        </ul>
++      </main>
++    </div>
++  );
++}
+diff --git a/hooks/useResultsData.js b/hooks/useResultsData.js
+index f6fac38..abb99c2 100644
+--- a/hooks/useResultsData.js
++++ b/hooks/useResultsData.js
+@@ -48,6 +48,26 @@ export function useResultsData() {
+         const idea = await forgeWithPuter(prompt, mode);
+         setIdeas([idea]);
+         setError(null);
++        try {
++          await fetch("/api/ideas", {
++            method: "POST",
++            headers: { "Content-Type": "application/json" },
++            credentials: "include",
++            body: JSON.stringify({
++              action: "save",
++              prompt,
++              title: idea.title,
++              description: idea.description,
++              target_audience: idea.target_audience,
++              key_features: idea.key_features,
++              scores: idea.scores,
++              model_source: idea.model_source,
++              creative_mode: idea.creative_mode,
++            }),
++          });
++        } catch {
++          // Guests and a quiet database still see the assay.
++        }
+         return;
+       } catch (puterErr) {
+         console.warn("Puter bellows dark", puterErr);
+diff --git a/package-lock.json b/package-lock.json
+index 2df57b0..674801d 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,10 +1,10 @@
+ {
+-	"name": "web",
++	"name": "idea-forge",
+ 	"lockfileVersion": 3,
+ 	"requires": true,
+ 	"packages": {
+ 		"": {
+-			"name": "web",
++			"name": "idea-forge",
+ 			"dependencies": {
+ 				"@auth/core": "^0.37.2",
+ 				"@babel/generator": "^7.27.1",
+@@ -24,6 +24,7 @@
+ 				"@tanstack/react-table": "^8.21.2",
+ 				"@types/babel__core": "^7.20.5",
+ 				"@vis.gl/react-google-maps": "^0.8.3",
++				"ai-buffer": "github:noahnemo-rgb/ai-buffer-template",
+ 				"argon2": "^0.43.0",
+ 				"classnames": "^2.5.1",
+ 				"clean-stack": "^5.2.0",
+@@ -90,6 +91,9 @@
+ 				"vite-plugin-babel": "^1.3.1",
+ 				"vite-tsconfig-paths": "^5.1.4",
+ 				"vitest": "^3.2.4"
++			},
++			"engines": {
++				"node": ">=20"
+ 			}
+ 		},
+ 		"node_modules/@adobe/css-tools": {
+@@ -6235,6 +6239,22 @@
+ 				"node": ">= 14"
+ 			}
+ 		},
++		"node_modules/ai-buffer": {
++			"version": "0.2.0",
++			"resolved": "git+ssh://git@github.com/noahnemo-rgb/ai-buffer-template.git#368db96eb920b4266b05b763458594f31367541b",
++			"license": "MIT",
++			"engines": {
++				"node": ">=18"
++			},
++			"peerDependencies": {
++				"@heyputer/puter.js": "^2.0.0"
++			},
++			"peerDependenciesMeta": {
++				"@heyputer/puter.js": {
++					"optional": true
++				}
++			}
++		},
+ 		"node_modules/ansi-regex": {
+ 			"version": "5.0.1",
+ 			"resolved": "https://registry.npmjs.org/ansi-regex/-/ansi-regex-5.0.1.tgz",
+@@ -6446,6 +6466,29 @@
+ 			"integrity": "sha512-3oSeUO0TMV67hN1AmbXsK4yaqU7tjiHlbxRDZOpH0KW9+CeX4bRAaX0Anxt0tx2MrpRpWwQaPwIlISEJhYU5Pw==",
+ 			"license": "MIT"
+ 		},
++		"node_modules/base64-js": {
++			"version": "1.5.1",
++			"resolved": "https://registry.npmjs.org/base64-js/-/base64-js-1.5.1.tgz",
++			"integrity": "sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==",
++			"dev": true,
++			"funding": [
++				{
++					"type": "github",
++					"url": "https://github.com/sponsors/feross"
++				},
++				{
++					"type": "patreon",
++					"url": "https://www.patreon.com/feross"
++				},
++				{
++					"type": "consulting",
++					"url": "https://feross.org/support"
++				}
++			],
++			"license": "MIT",
++			"optional": true,
++			"peer": true
++		},
+ 		"node_modules/baseline-browser-mapping": {
+ 			"version": "2.11.24",
+ 			"resolved": "https://registry.npmjs.org/baseline-browser-mapping/-/baseline-browser-mapping-2.11.24.tgz",
+@@ -6488,6 +6531,20 @@
+ 				"url": "https://github.com/sponsors/sindresorhus"
+ 			}
+ 		},
++		"node_modules/bl": {
++			"version": "4.1.0",
++			"resolved": "https://registry.npmjs.org/bl/-/bl-4.1.0.tgz",
++			"integrity": "sha512-1W07cM9gS6DcLperZfFSj+bWLtaPGSOHWhPiGzXmvVJbRLdG82sH/Kn8EtW1VqWVA54AKf2h5k5BbnIbwF3h6w==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true,
++			"dependencies": {
++				"buffer": "^5.5.0",
++				"inherits": "^2.0.4",
++				"readable-stream": "^3.4.0"
++			}
++		},
+ 		"node_modules/body-parser": {
+ 			"version": "1.20.8",
+ 			"resolved": "https://registry.npmjs.org/body-parser/-/body-parser-1.20.8.tgz",
+@@ -6581,6 +6638,33 @@
+ 				"node": "^6 || ^7 || ^8 || ^9 || ^10 || ^11 || ^12 || >=13.7"
+ 			}
+ 		},
++		"node_modules/buffer": {
++			"version": "5.7.1",
++			"resolved": "https://registry.npmjs.org/buffer/-/buffer-5.7.1.tgz",
++			"integrity": "sha512-EHcyIPBQ4BSGlvjB16k5KgAJ27CIsHY/2JBmCRReo48y9rQ3MaUzWX3KVlBa4U7MyX02HdVj0K7C3WaB3ju7FQ==",
++			"dev": true,
++			"funding": [
++				{
++					"type": "github",
++					"url": "https://github.com/sponsors/feross"
++				},
++				{
++					"type": "patreon",
++					"url": "https://www.patreon.com/feross"
++				},
++				{
++					"type": "consulting",
++					"url": "https://feross.org/support"
++				}
++			],
++			"license": "MIT",
++			"optional": true,
++			"peer": true,
++			"dependencies": {
++				"base64-js": "^1.3.1",
++				"ieee754": "^1.1.13"
++			}
++		},
+ 		"node_modules/buffer-from": {
+ 			"version": "1.1.2",
+ 			"resolved": "https://registry.npmjs.org/buffer-from/-/buffer-from-1.1.2.tgz",
+@@ -6673,21 +6757,31 @@
+ 			"license": "CC-BY-4.0"
+ 		},
+ 		"node_modules/canvas": {
+-			"version": "2.11.2",
+-			"resolved": "https://registry.npmjs.org/canvas/-/canvas-2.11.2.tgz",
+-			"integrity": "sha512-ItanGBMrmRV7Py2Z+Xhs7cT+FNt5K0vPL4p9EZ/UX/Mu7hFbkxSjKF2KVtPwX7UYWp7dRKnrTvReflgrItJbdw==",
++			"version": "3.2.3",
++			"resolved": "https://registry.npmjs.org/canvas/-/canvas-3.2.3.tgz",
++			"integrity": "sha512-PzE5nJZPz72YUAfo8oTp0u3fqqY7IzlTubneAihqDYAUcBk7ryeCmBbdJBEdaH0bptSOe2VT2Zwcb3UaFyaSWw==",
++			"dev": true,
+ 			"hasInstallScript": true,
+ 			"license": "MIT",
+ 			"optional": true,
++			"peer": true,
+ 			"dependencies": {
+-				"@mapbox/node-pre-gyp": "^1.0.0",
+-				"nan": "^2.17.0",
+-				"simple-get": "^3.0.3"
++				"node-addon-api": "^7.0.0",
++				"prebuild-install": "^7.1.3"
+ 			},
+ 			"engines": {
+-				"node": ">=6"
++				"node": "^18.12.0 || >= 20.9.0"
+ 			}
+ 		},
++		"node_modules/canvas/node_modules/node-addon-api": {
++			"version": "7.1.1",
++			"resolved": "https://registry.npmjs.org/node-addon-api/-/node-addon-api-7.1.1.tgz",
++			"integrity": "sha512-5m3bsyrjFWE1xf7nz7YXdN4udnVtXK6/Yfgn5qnahL6bCkf2yKt4k3nuTKAtT4r3IG8JNR2ncsIMdZuAzJjHQQ==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true
++		},
+ 		"node_modules/ccount": {
+ 			"version": "2.0.1",
+ 			"resolved": "https://registry.npmjs.org/ccount/-/ccount-2.0.1.tgz",
+@@ -6771,14 +6865,13 @@
+ 			}
+ 		},
+ 		"node_modules/chownr": {
+-			"version": "2.0.0",
+-			"resolved": "https://registry.npmjs.org/chownr/-/chownr-2.0.0.tgz",
+-			"integrity": "sha512-bIomtDF5KGpdogkLd9VspvFzk9KfpyyGlS8YFVZl7TGPBHL5snIOnxeshwVgPteQ9b4Eydl+pVbIyE1DcvCWgQ==",
++			"version": "1.1.4",
++			"resolved": "https://registry.npmjs.org/chownr/-/chownr-1.1.4.tgz",
++			"integrity": "sha512-jJ0bqzaylmJtVnNgzTeSOs8DPavpbYgEr/b0YL8/2GO3xJEhInFmhKMUnEJQjZumK7KXGFhUy89PrsJWlakBVg==",
++			"dev": true,
+ 			"license": "ISC",
+ 			"optional": true,
+-			"engines": {
+-				"node": ">=10"
+-			}
++			"peer": true
+ 		},
+ 		"node_modules/class-variance-authority": {
+ 			"version": "0.7.1",
+@@ -7286,16 +7379,21 @@
+ 			}
+ 		},
+ 		"node_modules/decompress-response": {
+-			"version": "4.2.1",
+-			"resolved": "https://registry.npmjs.org/decompress-response/-/decompress-response-4.2.1.tgz",
+-			"integrity": "sha512-jOSne2qbyE+/r8G1VU+G/82LBs2Fs4LAsTiLSHOCOMZQl2OKZ6i8i4IyHemTe+/yIXOtTcRQMzPcgyhoFlqPkw==",
++			"version": "6.0.0",
++			"resolved": "https://registry.npmjs.org/decompress-response/-/decompress-response-6.0.0.tgz",
++			"integrity": "sha512-aW35yZM6Bb/4oJlZncMH2LCoZtJXTRxES17vE3hoRiowU2kWHaJKFkSBDnDR+cm9J+9QhXmREyIfv0pji9ejCQ==",
++			"dev": true,
+ 			"license": "MIT",
+ 			"optional": true,
++			"peer": true,
+ 			"dependencies": {
+-				"mimic-response": "^2.0.0"
++				"mimic-response": "^3.1.0"
+ 			},
+ 			"engines": {
+-				"node": ">=8"
++				"node": ">=10"
++			},
++			"funding": {
++				"url": "https://github.com/sponsors/sindresorhus"
+ 			}
+ 		},
+ 		"node_modules/dedent": {
+@@ -7322,6 +7420,18 @@
+ 				"node": ">=6"
+ 			}
+ 		},
++		"node_modules/deep-extend": {
++			"version": "0.6.0",
++			"resolved": "https://registry.npmjs.org/deep-extend/-/deep-extend-0.6.0.tgz",
++			"integrity": "sha512-LOHxIOaPYdHlJRtCQfDIVZtfw/ufM8+rVj649RIHzcm/vGwQRXFt6OPqIFWsm2XEMrNIEtWR64sY1LEKD2vAOA==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true,
++			"engines": {
++				"node": ">=4.0.0"
++			}
++		},
+ 		"node_modules/delegates": {
+ 			"version": "1.0.0",
+ 			"resolved": "https://registry.npmjs.org/delegates/-/delegates-1.0.0.tgz",
+@@ -7508,6 +7618,18 @@
+ 				"node": ">= 0.8"
+ 			}
+ 		},
++		"node_modules/end-of-stream": {
++			"version": "1.4.5",
++			"resolved": "https://registry.npmjs.org/end-of-stream/-/end-of-stream-1.4.5.tgz",
++			"integrity": "sha512-ooEGc6HP26xXq/N+GCGOT0JKCLDGrq2bQUZrQ7gyrJiZANJ/8YDTxTpQBXGMn+WbIQXNVpyWymm7KYVICQnyOg==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true,
++			"dependencies": {
++				"once": "^1.4.0"
++			}
++		},
+ 		"node_modules/enhanced-resolve": {
+ 			"version": "5.25.1",
+ 			"resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.25.1.tgz",
+@@ -7685,6 +7807,18 @@
+ 				"url": "https://github.com/sponsors/sindresorhus"
+ 			}
+ 		},
++		"node_modules/expand-template": {
++			"version": "2.0.3",
++			"resolved": "https://registry.npmjs.org/expand-template/-/expand-template-2.0.3.tgz",
++			"integrity": "sha512-XYfuKMvj4O35f/pOXLObndIRvyQ+/+6AhODh+OKWj9S9498pHHn/IMszH+gt0fBCRWMNfk1ZSp5x3AifmnI2vg==",
++			"dev": true,
++			"license": "(MIT OR WTFPL)",
++			"optional": true,
++			"peer": true,
++			"engines": {
++				"node": ">=6"
++			}
++		},
+ 		"node_modules/expect-type": {
+ 			"version": "1.4.0",
+ 			"resolved": "https://registry.npmjs.org/expect-type/-/expect-type-1.4.0.tgz",
+@@ -7942,6 +8076,15 @@
+ 				"node": ">= 0.6"
+ 			}
+ 		},
++		"node_modules/fs-constants": {
++			"version": "1.0.0",
++			"resolved": "https://registry.npmjs.org/fs-constants/-/fs-constants-1.0.0.tgz",
++			"integrity": "sha512-y6OAwoSIf7FyjMIv94u+b5rdheZEjzR63GTyZJm5qh4Bi+2YgwLCcI/fPFZkL5PSixOt6ZNKm+w+Hfp/Bciwow==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true
++		},
+ 		"node_modules/fs-minipass": {
+ 			"version": "2.1.0",
+ 			"resolved": "https://registry.npmjs.org/fs-minipass/-/fs-minipass-2.1.0.tgz",
+@@ -8094,6 +8237,15 @@
+ 				"node": ">= 0.4"
+ 			}
+ 		},
++		"node_modules/github-from-package": {
++			"version": "0.0.0",
++			"resolved": "https://registry.npmjs.org/github-from-package/-/github-from-package-0.0.0.tgz",
++			"integrity": "sha512-SyHy3T1v2NUXn29OsWdxmK6RwHD+vkj3v8en8AOBZ1wBQ/hCAQ5bAQTD02kW4W9tUp/3Qh6J8r9EvntiyCmOOw==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true
++		},
+ 		"node_modules/glob": {
+ 			"version": "7.2.3",
+ 			"resolved": "https://registry.npmjs.org/glob/-/glob-7.2.3.tgz",
+@@ -8312,6 +8464,29 @@
+ 				"node": ">=0.10.0"
+ 			}
+ 		},
++		"node_modules/ieee754": {
++			"version": "1.2.1",
++			"resolved": "https://registry.npmjs.org/ieee754/-/ieee754-1.2.1.tgz",
++			"integrity": "sha512-dcyqhDvX1C46lXZcVqCpK+FtMRQVdIMN6/Df5js2zouUsqG7I6sFxitIC+7KYK29KdXOLHdu9zL4sFnoVQnqaA==",
++			"dev": true,
++			"funding": [
++				{
++					"type": "github",
++					"url": "https://github.com/sponsors/feross"
++				},
++				{
++					"type": "patreon",
++					"url": "https://www.patreon.com/feross"
++				},
++				{
++					"type": "consulting",
++					"url": "https://feross.org/support"
++				}
++			],
++			"license": "BSD-3-Clause",
++			"optional": true,
++			"peer": true
++		},
+ 		"node_modules/import-fresh": {
+ 			"version": "3.3.1",
+ 			"resolved": "https://registry.npmjs.org/import-fresh/-/import-fresh-3.3.1.tgz",
+@@ -8356,6 +8531,15 @@
+ 			"integrity": "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==",
+ 			"license": "ISC"
+ 		},
++		"node_modules/ini": {
++			"version": "1.3.8",
++			"resolved": "https://registry.npmjs.org/ini/-/ini-1.3.8.tgz",
++			"integrity": "sha512-JV/yugV2uzW5iMRSiZAyDtQd+nxtUnjeLt0acNdw98kKLrvuRVyB80tsREOE7yvGVgalhZ6RNXCmEHkUKBKxew==",
++			"dev": true,
++			"license": "ISC",
++			"optional": true,
++			"peer": true
++		},
+ 		"node_modules/inline-style-parser": {
+ 			"version": "0.1.1",
+ 			"resolved": "https://registry.npmjs.org/inline-style-parser/-/inline-style-parser-0.1.1.tgz",
+@@ -9970,13 +10154,15 @@
+ 			}
+ 		},
+ 		"node_modules/mimic-response": {
+-			"version": "2.1.0",
+-			"resolved": "https://registry.npmjs.org/mimic-response/-/mimic-response-2.1.0.tgz",
+-			"integrity": "sha512-wXqjST+SLt7R009ySCglWBCFpjUygmCIfD790/kVbiGmUgfYGuB14PiTd5DwVxSV4NcYHjzMkoj5LjQZwTQLEA==",
++			"version": "3.1.0",
++			"resolved": "https://registry.npmjs.org/mimic-response/-/mimic-response-3.1.0.tgz",
++			"integrity": "sha512-z0yWI+4FDrrweS8Zmt4Ej5HdJmky15+L2e6Wgn3+iK5fWzb6T3fhNFq2+MeTRb064c6Wr4N/wv0DzQTjNzHNGQ==",
++			"dev": true,
+ 			"license": "MIT",
+ 			"optional": true,
++			"peer": true,
+ 			"engines": {
+-				"node": ">=8"
++				"node": ">=10"
+ 			},
+ 			"funding": {
+ 				"url": "https://github.com/sponsors/sindresorhus"
+@@ -10007,6 +10193,18 @@
+ 				"url": "https://github.com/sponsors/isaacs"
+ 			}
+ 		},
++		"node_modules/minimist": {
++			"version": "1.2.8",
++			"resolved": "https://registry.npmjs.org/minimist/-/minimist-1.2.8.tgz",
++			"integrity": "sha512-2yyAR8qBkN3YuheJanUpWC5U3bb5osDywNB8RzDVlDwDHbocAJveqqj1u8+SVD7jkWT4yvsHCpWqqWqAxb0zCA==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true,
++			"funding": {
++				"url": "https://github.com/sponsors/ljharb"
++			}
++		},
+ 		"node_modules/minipass": {
+ 			"version": "5.0.0",
+ 			"resolved": "https://registry.npmjs.org/minipass/-/minipass-5.0.0.tgz",
+@@ -10064,6 +10262,15 @@
+ 				"node": ">=10"
+ 			}
+ 		},
++		"node_modules/mkdirp-classic": {
++			"version": "0.5.3",
++			"resolved": "https://registry.npmjs.org/mkdirp-classic/-/mkdirp-classic-0.5.3.tgz",
++			"integrity": "sha512-gKLcREMhtuZRwRAfqP3RFW+TK4JqApVBtOIftVgjuABpAtpxhPGaDcfvbhNvD0B8iD1oUr/txX35NjcaY6Ns/A==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true
++		},
+ 		"node_modules/morgan": {
+ 			"version": "1.12.1",
+ 			"resolved": "https://registry.npmjs.org/morgan/-/morgan-1.12.1.tgz",
+@@ -10226,6 +10433,15 @@
+ 				"node": "^10 || ^12 || ^13.7 || ^14 || >=15.0.1"
+ 			}
+ 		},
++		"node_modules/napi-build-utils": {
++			"version": "2.0.0",
++			"resolved": "https://registry.npmjs.org/napi-build-utils/-/napi-build-utils-2.0.0.tgz",
++			"integrity": "sha512-GEbrYkbfF7MoNaoh2iGG84Mnf/WZfB0GdGEsM8wz7Expx/LlWf5U8t9nvJKXSp3qr5IsEbK04cBGhol/KwOsWA==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true
++		},
+ 		"node_modules/negotiator": {
+ 			"version": "0.6.4",
+ 			"resolved": "https://registry.npmjs.org/negotiator/-/negotiator-0.6.4.tgz",
+@@ -10245,6 +10461,36 @@
+ 				"react-dom": "^16.8 || ^17 || ^18"
+ 			}
+ 		},
++		"node_modules/node-abi": {
++			"version": "3.96.0",
++			"resolved": "https://registry.npmjs.org/node-abi/-/node-abi-3.96.0.tgz",
++			"integrity": "sha512-rebQ/lz7i0EkoLzUVSrKRzA69zMkwLp95kKMWoMDkkM00Suxz0D7zEQPwRml5fQum24mj7bPvmlgLAmu2JCiYg==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true,
++			"dependencies": {
++				"semver": "^7.3.5"
++			},
++			"engines": {
++				"node": ">=10"
++			}
++		},
++		"node_modules/node-abi/node_modules/semver": {
++			"version": "7.8.5",
++			"resolved": "https://registry.npmjs.org/semver/-/semver-7.8.5.tgz",
++			"integrity": "sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==",
++			"dev": true,
++			"license": "ISC",
++			"optional": true,
++			"peer": true,
++			"bin": {
++				"semver": "bin/semver.js"
++			},
++			"engines": {
++				"node": ">=10"
++			}
++		},
+ 		"node_modules/node-addon-api": {
+ 			"version": "8.9.2",
+ 			"resolved": "https://registry.npmjs.org/node-addon-api/-/node-addon-api-8.9.2.tgz",
+@@ -10610,6 +10856,60 @@
+ 				"path2d-polyfill": "^2.0.1"
+ 			}
+ 		},
++		"node_modules/pdfjs-dist/node_modules/canvas": {
++			"version": "2.11.2",
++			"resolved": "https://registry.npmjs.org/canvas/-/canvas-2.11.2.tgz",
++			"integrity": "sha512-ItanGBMrmRV7Py2Z+Xhs7cT+FNt5K0vPL4p9EZ/UX/Mu7hFbkxSjKF2KVtPwX7UYWp7dRKnrTvReflgrItJbdw==",
++			"hasInstallScript": true,
++			"license": "MIT",
++			"optional": true,
++			"dependencies": {
++				"@mapbox/node-pre-gyp": "^1.0.0",
++				"nan": "^2.17.0",
++				"simple-get": "^3.0.3"
++			},
++			"engines": {
++				"node": ">=6"
++			}
++		},
++		"node_modules/pdfjs-dist/node_modules/decompress-response": {
++			"version": "4.2.1",
++			"resolved": "https://registry.npmjs.org/decompress-response/-/decompress-response-4.2.1.tgz",
++			"integrity": "sha512-jOSne2qbyE+/r8G1VU+G/82LBs2Fs4LAsTiLSHOCOMZQl2OKZ6i8i4IyHemTe+/yIXOtTcRQMzPcgyhoFlqPkw==",
++			"license": "MIT",
++			"optional": true,
++			"dependencies": {
++				"mimic-response": "^2.0.0"
++			},
++			"engines": {
++				"node": ">=8"
++			}
++		},
++		"node_modules/pdfjs-dist/node_modules/mimic-response": {
++			"version": "2.1.0",
++			"resolved": "https://registry.npmjs.org/mimic-response/-/mimic-response-2.1.0.tgz",
++			"integrity": "sha512-wXqjST+SLt7R009ySCglWBCFpjUygmCIfD790/kVbiGmUgfYGuB14PiTd5DwVxSV4NcYHjzMkoj5LjQZwTQLEA==",
++			"license": "MIT",
++			"optional": true,
++			"engines": {
++				"node": ">=8"
++			},
++			"funding": {
++				"url": "https://github.com/sponsors/sindresorhus"
++			}
++		},
++		"node_modules/pdfjs-dist/node_modules/simple-get": {
++			"version": "3.1.1",
++			"resolved": "https://registry.npmjs.org/simple-get/-/simple-get-3.1.1.tgz",
++			"integrity": "sha512-CQ5LTKGfCpvE1K0n2us+kuMPbk/q0EKl82s4aheV9oXjFEz6W/Y7oQFVJuU6QG77hRT4Ghb5RURteF5vnWjupA==",
++			"license": "MIT",
++			"optional": true,
++			"dependencies": {
++				"decompress-response": "^4.2.0",
++				"once": "^1.3.1",
++				"simple-concat": "^1.0.0"
++			}
++		},
+ 		"node_modules/pg-int8": {
+ 			"version": "1.0.1",
+ 			"resolved": "https://registry.npmjs.org/pg-int8/-/pg-int8-1.0.1.tgz",
+@@ -10874,6 +11174,36 @@
+ 				"preact": ">=10"
+ 			}
+ 		},
++		"node_modules/prebuild-install": {
++			"version": "7.1.3",
++			"resolved": "https://registry.npmjs.org/prebuild-install/-/prebuild-install-7.1.3.tgz",
++			"integrity": "sha512-8Mf2cbV7x1cXPUILADGI3wuhfqWvtiLA1iclTDbFRZkgRQS0NqsPZphna9V+HyTEadheuPmjaJMsbzKQFOzLug==",
++			"deprecated": "No longer maintained. Please contact the author of the relevant native addon; alternatives are available.",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true,
++			"dependencies": {
++				"detect-libc": "^2.0.0",
++				"expand-template": "^2.0.3",
++				"github-from-package": "0.0.0",
++				"minimist": "^1.2.3",
++				"mkdirp-classic": "^0.5.3",
++				"napi-build-utils": "^2.0.0",
++				"node-abi": "^3.3.0",
++				"pump": "^3.0.0",
++				"rc": "^1.2.7",
++				"simple-get": "^4.0.0",
++				"tar-fs": "^2.0.0",
++				"tunnel-agent": "^0.6.0"
++			},
++			"bin": {
++				"prebuild-install": "bin.js"
++			},
++			"engines": {
++				"node": ">=10"
++			}
++		},
+ 		"node_modules/prettier": {
+ 			"version": "3.9.6",
+ 			"resolved": "https://registry.npmjs.org/prettier/-/prettier-3.9.6.tgz",
+@@ -10966,6 +11296,19 @@
+ 				"url": "https://opencollective.com/express"
+ 			}
+ 		},
++		"node_modules/pump": {
++			"version": "3.0.4",
++			"resolved": "https://registry.npmjs.org/pump/-/pump-3.0.4.tgz",
++			"integrity": "sha512-VS7sjc6KR7e1ukRFhQSY5LM2uBWAUPiOPa/A3mkKmiMwSmRFUITt0xuj+/lesgnCv+dPIEYlkzrcyXgquIHMcA==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true,
++			"dependencies": {
++				"end-of-stream": "^1.1.0",
++				"once": "^1.3.1"
++			}
++		},
+ 		"node_modules/punycode": {
+ 			"version": "2.3.1",
+ 			"resolved": "https://registry.npmjs.org/punycode/-/punycode-2.3.1.tgz",
+@@ -11036,6 +11379,24 @@
+ 				"node": ">= 0.8"
+ 			}
+ 		},
++		"node_modules/rc": {
++			"version": "1.2.8",
++			"resolved": "https://registry.npmjs.org/rc/-/rc-1.2.8.tgz",
++			"integrity": "sha512-y3bGgqKj3QBdxLbLkomlohkvsA8gdAiUQlSBJnBhfn+BPxg4bc62d8TcBW15wavDfgexCgccckhcZvywyQYPOw==",
++			"dev": true,
++			"license": "(BSD-2-Clause OR MIT OR Apache-2.0)",
++			"optional": true,
++			"peer": true,
++			"dependencies": {
++				"deep-extend": "^0.6.0",
++				"ini": "~1.3.0",
++				"minimist": "^1.2.0",
++				"strip-json-comments": "~2.0.1"
++			},
++			"bin": {
++				"rc": "cli.js"
++			}
++		},
+ 		"node_modules/react": {
+ 			"version": "18.3.1",
+ 			"resolved": "https://registry.npmjs.org/react/-/react-18.3.1.tgz",
+@@ -12232,13 +12593,29 @@
+ 			"optional": true
+ 		},
+ 		"node_modules/simple-get": {
+-			"version": "3.1.1",
+-			"resolved": "https://registry.npmjs.org/simple-get/-/simple-get-3.1.1.tgz",
+-			"integrity": "sha512-CQ5LTKGfCpvE1K0n2us+kuMPbk/q0EKl82s4aheV9oXjFEz6W/Y7oQFVJuU6QG77hRT4Ghb5RURteF5vnWjupA==",
++			"version": "4.0.1",
++			"resolved": "https://registry.npmjs.org/simple-get/-/simple-get-4.0.1.tgz",
++			"integrity": "sha512-brv7p5WgH0jmQJr1ZDDfKDOSeWWg+OVypG99A/5vYGPqJ6pxiaHLy8nxtFjBA7oMa01ebA9gfh1uMCFqOuXxvA==",
++			"dev": true,
++			"funding": [
++				{
++					"type": "github",
++					"url": "https://github.com/sponsors/feross"
++				},
++				{
++					"type": "patreon",
++					"url": "https://www.patreon.com/feross"
++				},
++				{
++					"type": "consulting",
++					"url": "https://feross.org/support"
++				}
++			],
+ 			"license": "MIT",
+ 			"optional": true,
++			"peer": true,
+ 			"dependencies": {
+-				"decompress-response": "^4.2.0",
++				"decompress-response": "^6.0.0",
+ 				"once": "^1.3.1",
+ 				"simple-concat": "^1.0.0"
+ 			}
+@@ -12380,6 +12757,18 @@
+ 				"node": ">=8"
+ 			}
+ 		},
++		"node_modules/strip-json-comments": {
++			"version": "2.0.1",
++			"resolved": "https://registry.npmjs.org/strip-json-comments/-/strip-json-comments-2.0.1.tgz",
++			"integrity": "sha512-4gB8na07fecVVkOI6Rs4e7T6NOTki5EmL7TUduTs6bu3EdnSycntVJ4re8kgZA+wx9IueI2Y11bfbgwtzuE0KQ==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true,
++			"engines": {
++				"node": ">=0.10.0"
++			}
++		},
+ 		"node_modules/strip-literal": {
+ 			"version": "3.1.0",
+ 			"resolved": "https://registry.npmjs.org/strip-literal/-/strip-literal-3.1.0.tgz",
+@@ -12690,6 +13079,50 @@
+ 				"node": ">=10"
+ 			}
+ 		},
++		"node_modules/tar-fs": {
++			"version": "2.1.5",
++			"resolved": "https://registry.npmjs.org/tar-fs/-/tar-fs-2.1.5.tgz",
++			"integrity": "sha512-OboTd8mmMhZDNPV+UjQcK9yKAatXu2aJ+r1w4im1Otd4M4fl2hwvdoXUxIYHFTHWK/3y3FarBP70v3vwmGlOxw==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true,
++			"dependencies": {
++				"chownr": "^1.1.1",
++				"mkdirp-classic": "^0.5.2",
++				"pump": "^3.0.0",
++				"tar-stream": "^2.1.4"
++			}
++		},
++		"node_modules/tar-stream": {
++			"version": "2.2.0",
++			"resolved": "https://registry.npmjs.org/tar-stream/-/tar-stream-2.2.0.tgz",
++			"integrity": "sha512-ujeqbceABgwMZxEJnk2HDY2DlnUZ+9oEcb1KzTVfYHio0UE6dG71n60d8D2I4qNvleWrrXpmjpt7vZeF1LnMZQ==",
++			"dev": true,
++			"license": "MIT",
++			"optional": true,
++			"peer": true,
++			"dependencies": {
++				"bl": "^4.0.3",
++				"end-of-stream": "^1.4.1",
++				"fs-constants": "^1.0.0",
++				"inherits": "^2.0.3",
++				"readable-stream": "^3.1.1"
++			},
++			"engines": {
++				"node": ">=6"
++			}
++		},
++		"node_modules/tar/node_modules/chownr": {
++			"version": "2.0.0",
++			"resolved": "https://registry.npmjs.org/chownr/-/chownr-2.0.0.tgz",
++			"integrity": "sha512-bIomtDF5KGpdogkLd9VspvFzk9KfpyyGlS8YFVZl7TGPBHL5snIOnxeshwVgPteQ9b4Eydl+pVbIyE1DcvCWgQ==",
++			"license": "ISC",
++			"optional": true,
++			"engines": {
++				"node": ">=10"
++			}
++		},
+ 		"node_modules/tar/node_modules/yallist": {
+ 			"version": "4.0.0",
+ 			"resolved": "https://registry.npmjs.org/yallist/-/yallist-4.0.0.tgz",
+@@ -12948,6 +13381,21 @@
+ 			"integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
+ 			"license": "0BSD"
+ 		},
++		"node_modules/tunnel-agent": {
++			"version": "0.6.0",
++			"resolved": "https://registry.npmjs.org/tunnel-agent/-/tunnel-agent-0.6.0.tgz",
++			"integrity": "sha512-McnNiV1l8RYeY8tBgEpuodCC1mLUdbSN+CYBL7kJsJNInOP8UjDDEwdk6Mw60vdLLrr5NHKZhMAOSrR2NZuQ+w==",
++			"dev": true,
++			"license": "Apache-2.0",
++			"optional": true,
++			"peer": true,
++			"dependencies": {
++				"safe-buffer": "^5.0.1"
++			},
++			"engines": {
++				"node": "*"
++			}
++		},
+ 		"node_modules/type-fest": {
+ 			"version": "4.41.0",
+ 			"resolved": "https://registry.npmjs.org/type-fest/-/type-fest-4.41.0.tgz",
+diff --git a/package.json b/package.json
+index 2259c10..d97c1ed 100644
+--- a/package.json
++++ b/package.json
+@@ -7,9 +7,11 @@
+ 		"build": "react-router build",
+ 		"start": "react-router-serve ./build/server/index.js",
+ 		"typecheck": "react-router typegen && tsc --noEmit",
+-		"heat:local": "node scripts/heat-local.mjs"
++		"heat:local": "node scripts/heat-local.mjs",
++		"test": "node --test server/forge/handle.test.js utils/heat/donatorSequencer.test.mjs"
+ 	},
+ 	"dependencies": {
++		"ai-buffer": "github:noahnemo-rgb/ai-buffer-template",
+ 		"@auth/core": "^0.37.2",
+ 		"@babel/generator": "^7.27.1",
+ 		"@chakra-ui/react": "2.8.2",
+diff --git a/page.jsx b/page.jsx
+index 8a95cf5..25e8b3e 100644
+--- a/page.jsx
++++ b/page.jsx
+@@ -221,6 +221,18 @@ export default function HomePage() {
+           <span className="text-xl font-bold tracking-tight">IdeaForge</span>
+         </div>
+         <div className="flex items-center gap-6">
++          <a
++            href="/community"
++            className="text-sm text-white/70 hover:text-white transition-colors"
++          >
++            Community
++          </a>
++          <a
++            href="/chat"
++            className="text-sm text-white/70 hover:text-white transition-colors"
++          >
++            Chat
++          </a>
+           <a
+             href="/history"
+             className="text-sm text-white/70 hover:text-white transition-colors"
+diff --git a/server/forge/handle.js b/server/forge/handle.js
+new file mode 100644
+index 0000000..96baa6d
+--- /dev/null
++++ b/server/forge/handle.js
+@@ -0,0 +1,429 @@
++import { hashPassword, verifyPassword } from "./password.js";
++import {
++  clearSessionCookie,
++  hashToken,
++  newSessionToken,
++  readCookie,
++  sessionCookie,
++  sessionExpiry,
++} from "./session.js";
++
++const TRENDS = [
++  { id: 1, topic: "AI-Powered Micro-SaaS", category: "Tech", source: "Market Trends" },
++  { id: 2, topic: "Sustainable E-commerce", category: "Retail", source: "Consumer Reports" },
++  { id: 3, topic: "Remote Team Wellness", category: "HR", source: "Workplace Trends" },
++  { id: 4, topic: "Personalized Learning Paths", category: "EdTech", source: "Education Trends" },
++  { id: 5, topic: "Hyper-local Delivery Networks", category: "Logistics", source: "Urban Trends" },
++];
++
++const ASSAY_PROMPT =
++  "You help a human partner assay one idea. Return ONLY JSON with title, description, target_audience, problem_solved, unique_value_prop, key_features, monetization_strategies, technical_feasibility, market_validation_hints, and scores for market_size, build_difficulty, and monetization_potential from 1 to 10. Be concrete. Do not treat the human as a meter or the model as a tool.";
++
++const CHAT_PROMPT =
++  "You are the Idea Forge assistant. Help the partner think through one business idea. Be concrete and short. When you suggest a next step, say whether the human or a named helper does it.";
++
++function json(status, body, headers = {}) {
++  return { status, headers, json: body };
++}
++
++function publicUser(user) {
++  if (!user) return null;
++  return {
++    id: user.id,
++    email: user.email,
++    name: user.name,
++    image: user.image ?? null,
++    subscription_status: user.subscription_status,
++    credits: user.credits,
++    last_credit_reset: user.last_credit_reset,
++    has_asked_migration: user.has_asked_migration,
++    stripe_customer_id: user.stripe_customer_id,
++  };
++}
++
++function parseIdeaText(text, prompt, mode) {
++  const raw = String(text || "");
++  const start = raw.indexOf("{");
++  const end = raw.lastIndexOf("}");
++  let data = {};
++  if (start >= 0 && end > start) {
++    try {
++      data = JSON.parse(raw.slice(start, end + 1));
++    } catch {
++      data = {};
++    }
++  }
++  return {
++    prompt,
++    title: data.title || "Assay",
++    description: data.description || raw.slice(0, 800) || prompt,
++    target_audience: data.target_audience || "Not specified",
++    problem_solved: data.problem_solved || null,
++    unique_value_prop: data.unique_value_prop || null,
++    key_features: Array.isArray(data.key_features) ? data.key_features : [],
++    monetization_strategies: Array.isArray(data.monetization_strategies) ? data.monetization_strategies : [],
++    technical_feasibility: data.technical_feasibility || null,
++    market_validation_hints: data.market_validation_hints || null,
++    scores: data.scores || {},
++    model_source: "ai-buffer",
++    creative_mode: mode || "balanced",
++  };
++}
++
++async function userFromCookie(store, cookieHeader) {
++  const token = readCookie(cookieHeader);
++  if (!token) return { token: null, user: null };
++  const user = await store.userForToken(hashToken(token));
++  return { token, user };
++}
++
++/**
++ * One backend for accounts, saved ideas, community, chat, and Stripe.
++ * `completeChat` is ai-buffer's streamChat, injected so tests stay offline.
++ */
++export async function handleForge(request) {
++  const {
++    method,
++    path,
++    headers = {},
++    body = {},
++    store,
++    env = process.env,
++    completeChat,
++    secure = false,
++  } = request;
++  const route = `/${path.filter(Boolean).join("/")}`;
++
++  if (!store && route !== "/trends") {
++    return json(503, {
++      error: "Database is not connected. Set DATABASE_URL to a Neon Postgres connection string.",
++      code: "database_off",
++    });
++  }
++  if (store) await store.ready();
++
++  const session = store ? await userFromCookie(store, headers.cookie) : { token: null, user: null };
++
++  if (method === "GET" && route === "/trends") {
++    return json(200, { trends: TRENDS });
++  }
++
++  if (method === "POST" && route === "/account/signup") {
++    const email = String(body.email || "");
++    const password = String(body.password || "");
++    if (!email.includes("@") || password.length < 8) {
++      return json(400, { error: "Use a real email and a password of at least 8 characters." });
++    }
++    const created = await store.createUser({
++      email,
++      name: body.name,
++      passwordHash: await hashPassword(password),
++    });
++    if (!created) return json(409, { error: "Could not create account. Email might already be in use." });
++    return await startSession(store, created, secure);
++  }
++
++  if (method === "POST" && route === "/account/signin") {
++    const user = await store.findUserByEmail(String(body.email || ""));
++    const valid = user && (await verifyPassword(String(body.password || ""), user.password_hash));
++    if (!valid) return json(401, { error: "Invalid email or password. Please try again." });
++    return await startSession(store, user, secure);
++  }
++
++  if (method === "POST" && route === "/account/signout") {
++    if (session.token) await store.deleteSession(hashToken(session.token));
++    return json(200, { ok: true }, { "Set-Cookie": clearSessionCookie() });
++  }
++
++  if (method === "GET" && (route === "/account/session" || route === "/auth/session")) {
++    return json(200, { user: publicUser(session.user), expires: session.user ? sessionExpiry() : null });
++  }
++
++  if (method === "POST" && route === "/auth/welcome") {
++    return json(200, { ok: true });
++  }
++
++  if (route === "/auth/migrate") {
++    if (!session.user) return json(401, { error: "Unauthorized" });
++    if (method === "GET") return json(200, { exists: false, count: 0 });
++    await store.markMigrationAsked(session.user.id);
++    return json(200, { success: true, migratedCount: 0 });
++  }
++
++  if (method === "GET" && route === "/user/profile") {
++    if (!session.user) return json(200, { user: null });
++    const user = await store.refreshCredits(session.user);
++    return json(200, { user: publicUser(user) });
++  }
++
++  if (method === "GET" && route === "/ideas") {
++    if (!session.user) return json(200, { ideas: [], collections: [] });
++    let ideas = await store.listIdeasForUser(session.user);
++    if (request.query?.favorites === "true") ideas = ideas.filter((idea) => idea.is_favorite);
++    if (request.query?.shared === "true") ideas = ideas.filter((idea) => idea.is_shared);
++    return json(200, { ideas, collections: [] });
++  }
++
++  if (method === "GET" && route === "/community") {
++    return json(200, { ideas: await store.listPublicIdeas() });
++  }
++
++  if (method === "POST" && route === "/ideas") {
++    if (!session.user) return json(401, { error: "Unauthorized" });
++    if (body.action === "vote") {
++      const voted = await store.toggleVote(body.ideaId, session.user.id);
++      return json(200, { success: true, voted });
++    }
++    if (body.action === "publish") {
++      const idea = await store.setVisibility(body.ideaId, session.user.id, "public");
++      if (!idea) return json(403, { error: "Idea not found or unauthorized" });
++      return json(200, { idea });
++    }
++    if (body.action === "favorite") {
++      const idea = await store.setFavorite(body.ideaId ?? body.id, session.user.id, body.is_favorite);
++      if (!idea) return json(403, { error: "Idea not found or unauthorized" });
++      return json(200, { success: true });
++    }
++    if (body.action === "save" || body.title) {
++      const spent = await store.spendCredit(session.user);
++      if (!spent.ok) {
++        return json(403, { error: "Daily limit reached", limitReached: true, code: "rate_limited" });
++      }
++      const idea = await store.insertIdea({
++        user_id: session.user.id,
++        prompt: body.prompt ?? body.idea?.prompt,
++        title: body.title ?? body.idea?.title,
++        description: body.description ?? body.idea?.description,
++        target_audience: body.target_audience ?? body.idea?.target_audience,
++        problem_solved: body.problem_solved ?? body.idea?.problem_solved,
++        unique_value_prop: body.unique_value_prop ?? body.idea?.unique_value_prop,
++        key_features: body.key_features ?? body.idea?.key_features,
++        monetization_strategies: body.monetization_strategies ?? body.idea?.monetization_strategies,
++        technical_feasibility: body.technical_feasibility ?? body.idea?.technical_feasibility,
++        market_validation_hints: body.market_validation_hints ?? body.idea?.market_validation_hints,
++        scores: body.scores ?? body.idea?.scores,
++        model_source: body.model_source ?? body.idea?.model_source ?? "puter",
++        creative_mode: body.creative_mode ?? body.idea?.creative_mode,
++      });
++      return json(200, { idea, remainingCredits: spent.credits });
++    }
++    return json(400, { error: "Invalid action" });
++  }
++
++  if (method === "GET" && route === "/ideas/share") {
++    if (!session.user) return json(200, { shares: [] });
++    return json(200, { shares: await store.listSharesBy(session.user.id) });
++  }
++
++  if (method === "POST" && route === "/ideas/share") {
++    if (!session.user) return json(401, { error: "Unauthorized" });
++    const idea = await store.findIdea(body.ideaId);
++    if (!idea || idea.user_id !== session.user.id) {
++      return json(403, { error: "Idea not found or unauthorized" });
++    }
++    if (body.community) {
++      await store.setVisibility(body.ideaId, session.user.id, "public");
++      return json(200, { success: true, visibility: "public" });
++    }
++    if (!body.shareWithEmail) return json(400, { error: "Missing ideaId or shareWithEmail" });
++    await store.shareIdea({ ideaId: body.ideaId, sharedBy: session.user.id, email: body.shareWithEmail });
++    return json(200, { success: true });
++  }
++
++  if (method === "GET" && route === "/ideas/comments") {
++    if (!body.ideaId && !request.query?.ideaId) return json(400, { error: "Missing ideaId" });
++    const ideaId = request.query?.ideaId || body.ideaId;
++    return json(200, { comments: await store.listComments(ideaId) });
++  }
++
++  if (method === "POST" && route === "/ideas/comments") {
++    if (!session.user) return json(401, { error: "Unauthorized" });
++    if (!body.ideaId || !body.content) return json(400, { error: "Missing ideaId or content" });
++    const comment = await store.addComment({
++      ideaId: body.ideaId,
++      userId: session.user.id,
++      content: String(body.content).slice(0, 2000),
++    });
++    return json(200, { comment });
++  }
++
++  if (method === "GET" && route === "/chat") {
++    if (!session.user) return json(401, { error: "Unauthorized" });
++    const messages = await store.listChat(session.user.id, request.query?.ideaId);
++    return json(200, { messages });
++  }
++
++  if (method === "POST" && route === "/chat/log") {
++    if (!session.user) return json(401, { error: "Unauthorized" });
++    if (!body.content) return json(400, { error: "Missing content" });
++    await store.addChat({
++      userId: session.user.id,
++      ideaId: body.ideaId,
++      role: body.role === "assistant" ? "assistant" : "user",
++      content: String(body.content).slice(0, 8000),
++    });
++    return json(200, { ok: true });
++  }
++
++  if (method === "POST" && route === "/chat") {
++    if (!session.user) return json(401, { error: "Unauthorized" });
++    const apiKey = String(body.apiKey || env.OPENROUTER_API_KEY || "").trim();
++    if (!apiKey) {
++      return json(503, {
++        error: "Add an OpenRouter key on this device, or set OPENROUTER_API_KEY on the server. The website can also use Puter.",
++        code: "missing_key",
++      });
++    }
++    const message = String(body.message || "").trim();
++    if (!message) return json(400, { error: "Message is empty.", code: "empty_message" });
++    const ran = await runModel(completeChat, {
++      apiKey,
++      systemPrompt: body.systemPrompt || CHAT_PROMPT,
++      message,
++      history: Array.isArray(body.history) ? body.history : [],
++    });
++    if (ran.error) return ran.error;
++    await store.addChat({ userId: session.user.id, ideaId: body.ideaId, role: "user", content: message });
++    await store.addChat({ userId: session.user.id, ideaId: body.ideaId, role: "assistant", content: ran.text });
++    return json(200, { reply: ran.text });
++  }
++
++  if (method === "POST" && route === "/generate") {
++    const apiKey = String(body.apiKey || env.OPENROUTER_API_KEY || "").trim();
++    if (!apiKey) {
++      return json(503, {
++        error: "No model key is configured. Sign in to Puter in the browser, or set OPENROUTER_API_KEY.",
++        code: "missing_key",
++      });
++    }
++    if (session.user) {
++      const spent = await store.spendCredit(session.user);
++      if (!spent.ok) return json(403, { error: "Daily limit reached", limitReached: true });
++    }
++    const prompt = String(body.prompt || "").trim();
++    if (!prompt) return json(400, { error: "Prompt is required" });
++    const ran = await runModel(completeChat, {
++      apiKey,
++      systemPrompt: ASSAY_PROMPT,
++      message: `Creative mode: ${body.creativeMode || "balanced"}. Seed: ${prompt}`,
++      history: [],
++    });
++    if (ran.error) return ran.error;
++    const text = ran.text;
++    const parsed = parseIdeaText(text, prompt, body.creativeMode);
++    let saved = null;
++    if (session.user) {
++      saved = await store.insertIdea({ ...parsed, user_id: session.user.id });
++    }
++    const idea = saved || { ...parsed, id: "buffer-assay" };
++    return json(200, { ideas: [idea], remainingCredits: session.user?.credits ?? null });
++  }
++
++  if (method === "GET" && route === "/stripe/status") {
++    if (!session.user) return json(401, { error: "Unauthorized" });
++    return json(200, {
++      status: session.user.subscription_status || "free",
++      stripe: env.STRIPE_SECRET_KEY ? "ready" : "not_configured",
++    });
++  }
++
++  if (method === "POST" && route === "/stripe/checkout") {
++    if (!session.user) return json(401, { error: "Unauthorized" });
++    if (!env.STRIPE_SECRET_KEY) {
++      return json(503, {
++        error: "Stripe is not activated. Set STRIPE_SECRET_KEY on the server.",
++        code: "stripe_off",
++      });
++    }
++    const { default: Stripe } = await import("stripe");
++    const stripe = new Stripe(env.STRIPE_SECRET_KEY);
++    let customerId = session.user.stripe_customer_id;
++    if (!customerId) {
++      const customer = await stripe.customers.create({
++        email: session.user.email,
++        metadata: { userId: session.user.id, source: "ideaforge" },
++      });
++      customerId = customer.id;
++      await store.setStripeCustomer(session.user.id, customerId);
++    }
++    const origin = env.APP_ORIGIN || "https://one-idea-forge-ai.vercel.app";
++    const price = env.STRIPE_PRICE_ID;
++    const checkout = await stripe.checkout.sessions.create({
++      mode: "subscription",
++      customer: customerId,
++      line_items: price
++        ? [{ price, quantity: 1 }]
++        : [
++            {
++              quantity: 1,
++              price_data: {
++                currency: "usd",
++                unit_amount: 1900,
++                recurring: { interval: "month" },
++                product_data: { name: "IdeaForge Pro (Monthly)" },
++              },
++            },
++          ],
++      success_url: body.redirectURL || `${origin}/settings?session_id={CHECKOUT_SESSION_ID}`,
++      cancel_url: body.redirectURL || `${origin}/settings`,
++      metadata: { userId: session.user.id },
++    });
++    return json(200, { url: checkout.url });
++  }
++
++  if (method === "POST" && route === "/stripe/webhook") {
++    if (!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET) {
++      return json(503, { error: "Stripe webhook is not activated.", code: "stripe_off" });
++    }
++    const { default: Stripe } = await import("stripe");
++    const stripe = new Stripe(env.STRIPE_SECRET_KEY);
++    let event;
++    try {
++      event = stripe.webhooks.constructEvent(
++        request.rawBody || "",
++        headers["stripe-signature"],
++        env.STRIPE_WEBHOOK_SECRET,
++      );
++    } catch (error) {
++      return json(400, { error: error.message || "Webhook signature verification failed" });
++    }
++    const object = event.data?.object;
++    if (event.type === "checkout.session.completed" && object?.customer) {
++      await store.setSubscriptionByCustomer(object.customer, "pro");
++    }
++    if (event.type === "customer.subscription.deleted" && object?.customer) {
++      await store.setSubscriptionByCustomer(object.customer, "free");
++    }
++    if (
++      (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated") &&
++      object?.customer
++    ) {
++      const active = object.status === "active" || object.status === "trialing";
++      await store.setSubscriptionByCustomer(object.customer, active ? "pro" : "free");
++    }
++    return json(200, { received: true });
++  }
++
++  return json(404, { error: "Not found" });
++}
++
++async function runModel(completeChat, input) {
++  if (!completeChat) return { error: json(500, { error: "Chat adapter is not configured." }) };
++  try {
++    return { text: await completeChat(input) };
++  } catch (error) {
++    const code = error?.code || "provider_error";
++    const status = code === "payment_required" ? 402 : code === "rate_limited" ? 429 : code === "missing_key" ? 503 : 502;
++    return { error: json(status, { error: error.message || "AI request failed", code }) };
++  }
++}
++
++async function startSession(store, user, secure) {
++  const token = newSessionToken();
++  await store.saveSession({
++    tokenHash: hashToken(token),
++    userId: user.id,
++    expiresAt: sessionExpiry(),
++  });
++  return json(200, { user: publicUser(user) }, { "Set-Cookie": sessionCookie(token, { secure }) });
++}
+diff --git a/server/forge/handle.test.js b/server/forge/handle.test.js
+new file mode 100644
+index 0000000..7082c40
+--- /dev/null
++++ b/server/forge/handle.test.js
+@@ -0,0 +1,217 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { handleForge } from "./handle.js";
++import { createMemoryStore } from "./memory-store.js";
++import { readCookie } from "./session.js";
++
++function cookieFrom(result) {
++  const header = result.headers?.["Set-Cookie"] || "";
++  const pair = header.split(";")[0];
++  return pair;
++}
++
++async function call(store, options) {
++  return handleForge({
++    store,
++    env: {},
++    secure: false,
++    headers: {},
++    body: {},
++    query: {},
++    ...options,
++  });
++}
++
++test("signup, signin, and session cookie", async () => {
++  const store = createMemoryStore();
++  const created = await call(store, {
++    method: "POST",
++    path: ["account", "signup"],
++    body: { email: "Ada@Example.com", password: "long-enough", name: "Ada" },
++  });
++  assert.equal(created.status, 200);
++  assert.equal(created.json.user.email, "ada@example.com");
++  assert.equal(created.json.user.name, "Ada");
++  const cookie = cookieFrom(created);
++  assert.ok(readCookie(cookie));
++
++  const session = await call(store, {
++    method: "GET",
++    path: ["account", "session"],
++    headers: { cookie },
++  });
++  assert.equal(session.json.user.id, created.json.user.id);
++
++  const signedOut = await call(store, {
++    method: "POST",
++    path: ["account", "signout"],
++    headers: { cookie },
++  });
++  assert.equal(signedOut.json.ok, true);
++  const again = await call(store, {
++    method: "GET",
++    path: ["account", "session"],
++    headers: { cookie },
++  });
++  assert.equal(again.json.user, null);
++
++  const bad = await call(store, {
++    method: "POST",
++    path: ["account", "signin"],
++    body: { email: "ada@example.com", password: "wrong-password" },
++  });
++  assert.equal(bad.status, 401);
++
++  const good = await call(store, {
++    method: "POST",
++    path: ["account", "signin"],
++    body: { email: "ada@example.com", password: "long-enough" },
++  });
++  assert.equal(good.status, 200);
++});
++
++test("duplicate email is rejected", async () => {
++  const store = createMemoryStore();
++  await call(store, {
++    method: "POST",
++    path: ["account", "signup"],
++    body: { email: "ada@example.com", password: "long-enough" },
++  });
++  const again = await call(store, {
++    method: "POST",
++    path: ["account", "signup"],
++    body: { email: "ada@example.com", password: "long-enough" },
++  });
++  assert.equal(again.status, 409);
++});
++
++test("saving spends the daily credit and the fourth save stops", async () => {
++  const store = createMemoryStore();
++  const created = await call(store, {
++    method: "POST",
++    path: ["account", "signup"],
++    body: { email: "ada@example.com", password: "long-enough" },
++  });
++  const cookie = cookieFrom(created);
++  for (let index = 0; index < 3; index += 1) {
++    const saved = await call(store, {
++      method: "POST",
++      path: ["ideas"],
++      headers: { cookie },
++      body: { action: "save", title: `Idea ${index}`, prompt: "seed" },
++    });
++    assert.equal(saved.status, 200);
++    assert.equal(saved.json.remainingCredits, 2 - index);
++  }
++  const blocked = await call(store, {
++    method: "POST",
++    path: ["ideas"],
++    headers: { cookie },
++    body: { action: "save", title: "One more" },
++  });
++  assert.equal(blocked.status, 403);
++  assert.equal(blocked.json.limitReached, true);
++});
++
++test("publish shows the idea in the community and comments require a session", async () => {
++  const store = createMemoryStore();
++  const created = await call(store, {
++    method: "POST",
++    path: ["account", "signup"],
++    body: { email: "ada@example.com", password: "long-enough", name: "Ada" },
++  });
++  const cookie = cookieFrom(created);
++  const saved = await call(store, {
++    method: "POST",
++    path: ["ideas"],
++    headers: { cookie },
++    body: { action: "save", title: "Public bench", description: "A shared assay" },
++  });
++  const published = await call(store, {
++    method: "POST",
++    path: ["ideas"],
++    headers: { cookie },
++    body: { action: "publish", ideaId: saved.json.idea.id },
++  });
++  assert.equal(published.status, 200);
++  const community = await call(store, { method: "GET", path: ["community"] });
++  assert.equal(community.json.ideas.length, 1);
++  assert.equal(community.json.ideas[0].title, "Public bench");
++
++  const denied = await call(store, {
++    method: "POST",
++    path: ["ideas", "comments"],
++    body: { ideaId: saved.json.idea.id, content: "hello" },
++  });
++  assert.equal(denied.status, 401);
++  const allowed = await call(store, {
++    method: "POST",
++    path: ["ideas", "comments"],
++    headers: { cookie },
++    body: { ideaId: saved.json.idea.id, content: "hello" },
++  });
++  assert.equal(allowed.status, 200);
++  const listed = await call(store, {
++    method: "GET",
++    path: ["ideas", "comments"],
++    query: { ideaId: saved.json.idea.id },
++  });
++  assert.equal(listed.json.comments.length, 1);
++});
++
++test("stripe checkout stays off without a secret key", async () => {
++  const store = createMemoryStore();
++  const created = await call(store, {
++    method: "POST",
++    path: ["account", "signup"],
++    body: { email: "ada@example.com", password: "long-enough" },
++  });
++  const status = await call(store, {
++    method: "POST",
++    path: ["stripe", "checkout"],
++    headers: { cookie: cookieFrom(created) },
++    env: {},
++  });
++  assert.equal(status.status, 503);
++  assert.equal(status.json.code, "stripe_off");
++});
++
++test("chat reports a missing key and generate saves the assay", async () => {
++  const store = createMemoryStore();
++  const created = await call(store, {
++    method: "POST",
++    path: ["account", "signup"],
++    body: { email: "ada@example.com", password: "long-enough" },
++  });
++  const cookie = cookieFrom(created);
++  const missing = await call(store, {
++    method: "POST",
++    path: ["chat"],
++    headers: { cookie },
++    body: { message: "Hello" },
++    env: {},
++  });
++  assert.equal(missing.status, 503);
++  assert.equal(missing.json.code, "missing_key");
++
++  const generated = await call(store, {
++    method: "POST",
++    path: ["generate"],
++    headers: { cookie },
++    body: { prompt: "a quieter inbox", apiKey: "test-key" },
++    completeChat: async () => '{"title":"Quiet Inbox","description":"Less noise","target_audience":"Teams"}',
++  });
++  assert.equal(generated.status, 200);
++  assert.equal(generated.json.ideas[0].title, "Quiet Inbox");
++  const ideas = await call(store, { method: "GET", path: ["ideas"], headers: { cookie } });
++  assert.equal(ideas.json.ideas[0].title, "Quiet Inbox");
++});
++
++test("trends work with the database disconnected", async () => {
++  const result = await handleForge({ method: "GET", path: ["trends"], store: null });
++  assert.equal(result.status, 200);
++  assert.ok(result.json.trends.length > 0);
++  const offline = await handleForge({ method: "GET", path: ["community"], store: null });
++  assert.equal(offline.status, 503);
++  assert.equal(offline.json.code, "database_off");
++});
+diff --git a/server/forge/hono-mount.ts b/server/forge/hono-mount.ts
+new file mode 100644
+index 0000000..8e2c608
+--- /dev/null
++++ b/server/forge/hono-mount.ts
+@@ -0,0 +1,49 @@
++import type { Hono } from "hono";
++import { isAuthAction } from "../is-auth-action";
++// @ts-expect-error Plain JavaScript module.
++import { handleForge } from "./handle.js";
++// @ts-expect-error Plain JavaScript module.
++import { completeChat } from "./node-adapter.js";
++// @ts-expect-error Plain JavaScript module.
++import { openNeonStore } from "./neon-store.js";
++
++export function attachForge(app: Hono): void {
++  app.all("/api/*", async (c, next) => {
++    if (isAuthAction(c.req.path)) return next();
++    const url = new URL(c.req.url);
++    const rawBody = c.req.method === "GET" || c.req.method === "HEAD" ? "" : await c.req.text();
++    let body: Record<string, unknown> = {};
++    if (rawBody && (c.req.header("content-type") || "").includes("application/json")) {
++      try {
++        body = JSON.parse(rawBody) as Record<string, unknown>;
++      } catch {
++        body = {};
++      }
++    }
++    let result;
++    try {
++      const store = await openNeonStore();
++      result = await handleForge({
++        method: c.req.method,
++        path: url.pathname.replace(/^\/api\/?/, "").split("/").filter(Boolean),
++        headers: {
++          cookie: c.req.header("cookie") || "",
++          "stripe-signature": c.req.header("stripe-signature") || "",
++        },
++        body,
++        rawBody,
++        query: Object.fromEntries(url.searchParams.entries()),
++        store,
++        secure: url.protocol === "https:" || process.env.VERCEL === "1",
++        completeChat,
++      });
++    } catch (error) {
++      const message = error instanceof Error ? error.message : "Request failed";
++      return c.json({ error: message }, 500);
++    }
++    const response = c.json(result.json ?? {}, result.status as 200);
++    const setCookie = result.headers?.["Set-Cookie"];
++    if (setCookie) response.headers.set("Set-Cookie", setCookie);
++    return response;
++  });
++}
+diff --git a/server/forge/memory-store.js b/server/forge/memory-store.js
+new file mode 100644
+index 0000000..5007bfb
+--- /dev/null
++++ b/server/forge/memory-store.js
+@@ -0,0 +1,217 @@
++import { randomUUID } from "node:crypto";
++
++function publicIdea(idea, users, votes, userId) {
++  const owner = users.find((user) => user.id === idea.user_id);
++  const ideaVotes = votes.filter((vote) => vote.idea_id === idea.id);
++  return {
++    ...idea,
++    owner_email: owner?.email ?? null,
++    user_name: owner?.name ?? owner?.email ?? "Partner",
++    vote_count: ideaVotes.length,
++    user_has_voted: userId ? ideaVotes.some((vote) => vote.user_id === userId) : false,
++    is_shared: userId ? idea.user_id !== userId : false,
++  };
++}
++
++export function createMemoryStore() {
++  const users = [];
++  const sessions = [];
++  const ideas = [];
++  const comments = [];
++  const votes = [];
++  const shares = [];
++  const chats = [];
++
++  return {
++    async ready() {},
++    async createUser({ email, name, passwordHash }) {
++      const normalized = email.trim().toLowerCase();
++      if (users.some((user) => user.email === normalized)) return null;
++      const user = {
++        id: randomUUID(),
++        email: normalized,
++        name: name?.trim() || normalized.split("@")[0],
++        image: null,
++        password_hash: passwordHash,
++        subscription_status: "free",
++        credits: 3,
++        last_credit_reset: new Date().toISOString(),
++        has_asked_migration: false,
++        stripe_customer_id: null,
++        last_check_subscription_status_at: null,
++        created_at: new Date().toISOString(),
++      };
++      users.push(user);
++      return user;
++    },
++    async findUserByEmail(email) {
++      return users.find((user) => user.email === email.trim().toLowerCase()) ?? null;
++    },
++    async findUserById(id) {
++      return users.find((user) => user.id === id) ?? null;
++    },
++    async saveSession({ tokenHash, userId, expiresAt }) {
++      sessions.push({ token_hash: tokenHash, user_id: userId, expires_at: expiresAt });
++    },
++    async userForToken(tokenHash, now = new Date()) {
++      const session = sessions.find((row) => row.token_hash === tokenHash);
++      if (!session || new Date(session.expires_at) <= now) return null;
++      return users.find((user) => user.id === session.user_id) ?? null;
++    },
++    async deleteSession(tokenHash) {
++      const index = sessions.findIndex((row) => row.token_hash === tokenHash);
++      if (index >= 0) sessions.splice(index, 1);
++    },
++    async refreshCredits(user, now = new Date()) {
++      const last = new Date(user.last_credit_reset);
++      if (last.toDateString() === now.toDateString()) return user;
++      user.credits = 3;
++      user.last_credit_reset = now.toISOString();
++      return user;
++    },
++    async insertIdea(input) {
++      const { id: _clientId, ...rest } = input;
++      const idea = {
++        id: randomUUID(),
++        visibility: "private",
++        is_favorite: false,
++        created_at: new Date().toISOString(),
++        problem_solved: null,
++        unique_value_prop: null,
++        monetization_strategies: null,
++        technical_feasibility: null,
++        market_validation_hints: null,
++        ...rest,
++      };
++      ideas.push(idea);
++      return idea;
++    },
++    async listIdeasForUser(user) {
++      const mine = ideas.filter((idea) => idea.user_id === user.id);
++      const sharedIds = shares
++        .filter((share) => share.shared_with_email === user.email)
++        .map((share) => share.idea_id);
++      const shared = ideas.filter((idea) => sharedIds.includes(idea.id));
++      const seen = new Set();
++      return [...mine, ...shared]
++        .filter((idea) => {
++          if (seen.has(idea.id)) return false;
++          seen.add(idea.id);
++          return true;
++        })
++        .sort((a, b) => b.created_at.localeCompare(a.created_at))
++        .map((idea) => publicIdea(idea, users, votes, user.id));
++    },
++    async listPublicIdeas() {
++      return ideas
++        .filter((idea) => idea.visibility === "public")
++        .sort((a, b) => b.created_at.localeCompare(a.created_at))
++        .map((idea) => publicIdea(idea, users, votes, null));
++    },
++    async findIdea(id) {
++      return ideas.find((idea) => idea.id === id) ?? null;
++    },
++    async setVisibility(id, userId, visibility) {
++      const idea = ideas.find((row) => row.id === id && row.user_id === userId);
++      if (!idea) return null;
++      idea.visibility = visibility;
++      return idea;
++    },
++    async setFavorite(id, userId, isFavorite) {
++      const idea = ideas.find((row) => row.id === id && row.user_id === userId);
++      if (!idea) return null;
++      idea.is_favorite = Boolean(isFavorite);
++      return idea;
++    },
++    async shareIdea({ ideaId, sharedBy, email }) {
++      const normalized = email.trim().toLowerCase();
++      if (shares.some((share) => share.idea_id === ideaId && share.shared_with_email === normalized)) {
++        return;
++      }
++      shares.push({
++        id: randomUUID(),
++        idea_id: ideaId,
++        shared_by: sharedBy,
++        shared_with_email: normalized,
++        created_at: new Date().toISOString(),
++      });
++    },
++    async listSharesBy(userId) {
++      return shares
++        .filter((share) => share.shared_by === userId)
++        .map((share) => ({
++          ...share,
++          idea_title: ideas.find((idea) => idea.id === share.idea_id)?.title ?? "",
++        }));
++    },
++    async addComment({ ideaId, userId, content }) {
++      const comment = {
++        id: randomUUID(),
++        idea_id: ideaId,
++        user_id: userId,
++        content,
++        created_at: new Date().toISOString(),
++      };
++      comments.push(comment);
++      const user = users.find((row) => row.id === userId);
++      return { ...comment, user_name: user?.name ?? "Partner", user_image: user?.image ?? null };
++    },
++    async listComments(ideaId) {
++      return comments
++        .filter((comment) => comment.idea_id === ideaId)
++        .map((comment) => {
++          const user = users.find((row) => row.id === comment.user_id);
++          return { ...comment, user_name: user?.name ?? "Partner", user_image: user?.image ?? null };
++        });
++    },
++    async toggleVote(ideaId, userId) {
++      const index = votes.findIndex((vote) => vote.idea_id === ideaId && vote.user_id === userId);
++      if (index >= 0) {
++        votes.splice(index, 1);
++        return false;
++      }
++      votes.push({ id: randomUUID(), idea_id: ideaId, user_id: userId, created_at: new Date().toISOString() });
++      return true;
++    },
++    async addChat({ userId, ideaId, role, content }) {
++      chats.push({
++        id: randomUUID(),
++        user_id: userId,
++        idea_id: ideaId ?? null,
++        role,
++        content,
++        created_at: new Date().toISOString(),
++      });
++    },
++    async listChat(userId, ideaId) {
++      return chats
++        .filter((row) => row.user_id === userId && (ideaId ? row.idea_id === ideaId : true))
++        .slice(-40);
++    },
++    async setStripeCustomer(userId, customerId) {
++      const user = users.find((row) => row.id === userId);
++      if (user) user.stripe_customer_id = customerId;
++      return user ?? null;
++    },
++    async setSubscriptionByCustomer(customerId, status) {
++      const user = users.find((row) => row.stripe_customer_id === customerId);
++      if (!user) return null;
++      user.subscription_status = status;
++      user.last_check_subscription_status_at = new Date().toISOString();
++      return user;
++    },
++    async spendCredit(user) {
++      if (user.subscription_status === "pro" || user.subscription_status === "active") {
++        return { ok: true, credits: "unlimited" };
++      }
++      await this.refreshCredits(user);
++      if (user.credits <= 0) return { ok: false, credits: 0 };
++      user.credits -= 1;
++      return { ok: true, credits: user.credits };
++    },
++    async markMigrationAsked(userId) {
++      const user = users.find((row) => row.id === userId);
++      if (user) user.has_asked_migration = true;
++    },
++  };
++}
+diff --git a/server/forge/neon-store.js b/server/forge/neon-store.js
+new file mode 100644
+index 0000000..7b0821f
+--- /dev/null
++++ b/server/forge/neon-store.js
+@@ -0,0 +1,275 @@
++import { SCHEMA_STATEMENTS } from "./schema.js";
++
++let schemaReady = false;
++
++function rowIdea(row, extras = {}) {
++  return {
++    ...row,
++    key_features: row.key_features ?? [],
++    monetization_strategies: row.monetization_strategies ?? [],
++    scores: row.scores ?? {},
++    vote_count: Number(extras.vote_count ?? row.vote_count ?? 0),
++    user_has_voted: Boolean(extras.user_has_voted ?? row.user_has_voted),
++    is_shared: Boolean(extras.is_shared ?? row.is_shared),
++  };
++}
++
++export function createNeonStore(sql) {
++  return {
++    async ready() {
++      if (schemaReady) return;
++      for (const statement of SCHEMA_STATEMENTS) {
++        try {
++          await sql.query(statement);
++        } catch (error) {
++          if (!statement.startsWith("CREATE EXTENSION")) throw error;
++        }
++      }
++      schemaReady = true;
++    },
++    async createUser({ email, name, passwordHash }) {
++      const rows = await sql.query(
++        `INSERT INTO users (email, name, password_hash)
++         VALUES ($1, $2, $3)
++         ON CONFLICT (email) DO NOTHING
++         RETURNING *`,
++        [email.trim().toLowerCase(), name?.trim() || email.trim().split("@")[0], passwordHash],
++      );
++      return rows[0] ?? null;
++    },
++    async findUserByEmail(email) {
++      const rows = await sql.query(`SELECT * FROM users WHERE email = $1`, [email.trim().toLowerCase()]);
++      return rows[0] ?? null;
++    },
++    async findUserById(id) {
++      const rows = await sql.query(`SELECT * FROM users WHERE id = $1`, [id]);
++      return rows[0] ?? null;
++    },
++    async saveSession({ tokenHash, userId, expiresAt }) {
++      await sql.query(
++        `INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)`,
++        [tokenHash, userId, expiresAt],
++      );
++    },
++    async userForToken(tokenHash) {
++      const rows = await sql.query(
++        `SELECT u.* FROM sessions s
++         JOIN users u ON u.id = s.user_id
++         WHERE s.token_hash = $1 AND s.expires_at > NOW()`,
++        [tokenHash],
++      );
++      return rows[0] ?? null;
++    },
++    async deleteSession(tokenHash) {
++      await sql.query(`DELETE FROM sessions WHERE token_hash = $1`, [tokenHash]);
++    },
++    async refreshCredits(user) {
++      const rows = await sql.query(
++        `UPDATE users
++         SET credits = 3, last_credit_reset = NOW()
++         WHERE id = $1 AND last_credit_reset::date < CURRENT_DATE
++         RETURNING *`,
++        [user.id],
++      );
++      return rows[0] ?? user;
++    },
++    async insertIdea(input) {
++      const rows = await sql.query(
++        `INSERT INTO ideas (
++           user_id, prompt, title, description, target_audience, problem_solved,
++           unique_value_prop, key_features, monetization_strategies, technical_feasibility,
++           market_validation_hints, scores, model_source, creative_mode, visibility
++         ) VALUES (
++           $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12::jsonb,$13,$14,$15
++         ) RETURNING *`,
++        [
++          input.user_id,
++          input.prompt ?? null,
++          input.title ?? "Untitled",
++          input.description ?? "",
++          input.target_audience ?? null,
++          input.problem_solved ?? null,
++          input.unique_value_prop ?? null,
++          JSON.stringify(input.key_features ?? []),
++          JSON.stringify(input.monetization_strategies ?? []),
++          input.technical_feasibility ?? null,
++          input.market_validation_hints ?? null,
++          JSON.stringify(input.scores ?? {}),
++          input.model_source ?? "ai-buffer",
++          input.creative_mode ?? "balanced",
++          input.visibility ?? "private",
++        ],
++      );
++      return rows[0];
++    },
++    async listIdeasForUser(user) {
++      const rows = await sql.query(
++        `SELECT i.*,
++                u_owner.email AS owner_email,
++                COALESCE(u_owner.name, u_owner.email) AS user_name,
++                (SELECT COUNT(*) FROM votes v WHERE v.idea_id = i.id) AS vote_count,
++                EXISTS(SELECT 1 FROM votes v WHERE v.idea_id = i.id AND v.user_id = $1) AS user_has_voted,
++                (i.user_id <> $1) AS is_shared
++         FROM ideas i
++         LEFT JOIN users u_owner ON u_owner.id = i.user_id
++         WHERE i.user_id = $1
++            OR EXISTS (
++              SELECT 1 FROM shared_ideas si
++              WHERE si.idea_id = i.id AND si.shared_with_email = $2
++            )
++         ORDER BY i.created_at DESC`,
++        [user.id, user.email],
++      );
++      return rows.map((row) => rowIdea(row));
++    },
++    async listPublicIdeas() {
++      const rows = await sql.query(
++        `SELECT i.*,
++                u_owner.email AS owner_email,
++                COALESCE(u_owner.name, u_owner.email) AS user_name,
++                (SELECT COUNT(*) FROM votes v WHERE v.idea_id = i.id) AS vote_count
++         FROM ideas i
++         LEFT JOIN users u_owner ON u_owner.id = i.user_id
++         WHERE i.visibility = 'public'
++         ORDER BY i.created_at DESC
++         LIMIT 100`,
++      );
++      return rows.map((row) => rowIdea(row));
++    },
++    async findIdea(id) {
++      const rows = await sql.query(`SELECT * FROM ideas WHERE id = $1`, [id]);
++      return rows[0] ?? null;
++    },
++    async setVisibility(id, userId, visibility) {
++      const rows = await sql.query(
++        `UPDATE ideas SET visibility = $3 WHERE id = $1 AND user_id = $2 RETURNING *`,
++        [id, userId, visibility],
++      );
++      return rows[0] ?? null;
++    },
++    async setFavorite(id, userId, isFavorite) {
++      const rows = await sql.query(
++        `UPDATE ideas SET is_favorite = $3 WHERE id = $1 AND user_id = $2 RETURNING *`,
++        [id, userId, isFavorite],
++      );
++      return rows[0] ?? null;
++    },
++    async shareIdea({ ideaId, sharedBy, email }) {
++      await sql.query(
++        `INSERT INTO shared_ideas (idea_id, shared_by, shared_with_email)
++         VALUES ($1, $2, $3)
++         ON CONFLICT (idea_id, shared_with_email) DO NOTHING`,
++        [ideaId, sharedBy, email.trim().toLowerCase()],
++      );
++    },
++    async listSharesBy(userId) {
++      return sql.query(
++        `SELECT si.*, i.title AS idea_title
++         FROM shared_ideas si
++         JOIN ideas i ON i.id = si.idea_id
++         WHERE si.shared_by = $1
++         ORDER BY si.created_at DESC`,
++        [userId],
++      );
++    },
++    async addComment({ ideaId, userId, content }) {
++      const rows = await sql.query(
++        `INSERT INTO comments (idea_id, user_id, content)
++         VALUES ($1, $2, $3)
++         RETURNING *`,
++        [ideaId, userId, content],
++      );
++      const userRows = await sql.query(`SELECT name, image FROM users WHERE id = $1`, [userId]);
++      return {
++        ...rows[0],
++        user_name: userRows[0]?.name ?? "Partner",
++        user_image: userRows[0]?.image ?? null,
++      };
++    },
++    async listComments(ideaId) {
++      return sql.query(
++        `SELECT c.*, u.name AS user_name, u.image AS user_image
++         FROM comments c
++         JOIN users u ON u.id = c.user_id
++         WHERE c.idea_id = $1
++         ORDER BY c.created_at ASC`,
++        [ideaId],
++      );
++    },
++    async toggleVote(ideaId, userId) {
++      const existing = await sql.query(
++        `SELECT id FROM votes WHERE idea_id = $1 AND user_id = $2`,
++        [ideaId, userId],
++      );
++      if (existing[0]) {
++        await sql.query(`DELETE FROM votes WHERE id = $1`, [existing[0].id]);
++        return false;
++      }
++      await sql.query(`INSERT INTO votes (idea_id, user_id) VALUES ($1, $2)`, [ideaId, userId]);
++      return true;
++    },
++    async addChat({ userId, ideaId, role, content }) {
++      await sql.query(
++        `INSERT INTO chat_messages (user_id, idea_id, role, content) VALUES ($1, $2, $3, $4)`,
++        [userId, ideaId ?? null, role, content],
++      );
++    },
++    async listChat(userId, ideaId) {
++      const filter = ideaId ? "AND idea_id = $2" : "";
++      const params = ideaId ? [userId, ideaId] : [userId];
++      return sql.query(
++        `SELECT role, content, created_at FROM (
++           SELECT role, content, created_at FROM chat_messages
++           WHERE user_id = $1 ${filter}
++           ORDER BY created_at DESC
++           LIMIT 40
++         ) recent
++         ORDER BY created_at ASC`,
++        params,
++      );
++    },
++    async setStripeCustomer(userId, customerId) {
++      const rows = await sql.query(
++        `UPDATE users SET stripe_customer_id = $2 WHERE id = $1 RETURNING *`,
++        [userId, customerId],
++      );
++      return rows[0] ?? null;
++    },
++    async setSubscriptionByCustomer(customerId, status) {
++      const rows = await sql.query(
++        `UPDATE users
++         SET subscription_status = $2, last_check_subscription_status_at = NOW()
++         WHERE stripe_customer_id = $1
++         RETURNING *`,
++        [customerId, status],
++      );
++      return rows[0] ?? null;
++    },
++    async spendCredit(user) {
++      if (user.subscription_status === "pro" || user.subscription_status === "active") {
++        return { ok: true, credits: "unlimited" };
++      }
++      const refreshed = await this.refreshCredits(user);
++      if (refreshed.credits <= 0) return { ok: false, credits: 0 };
++      const rows = await sql.query(
++        `UPDATE users SET credits = credits - 1 WHERE id = $1 AND credits > 0 RETURNING credits`,
++        [user.id],
++      );
++      if (!rows[0]) return { ok: false, credits: 0 };
++      user.credits = rows[0].credits;
++      return { ok: true, credits: rows[0].credits };
++    },
++    async markMigrationAsked(userId) {
++      await sql.query(`UPDATE users SET has_asked_migration = TRUE WHERE id = $1`, [userId]);
++    },
++  };
++}
++
++export async function openNeonStore() {
++  if (!process.env.DATABASE_URL) return null;
++  const { neon } = await import("@neondatabase/serverless");
++  const sql = neon(process.env.DATABASE_URL);
++  const store = createNeonStore(sql);
++  await store.ready();
++  return store;
++}
+diff --git a/server/forge/node-adapter.js b/server/forge/node-adapter.js
+new file mode 100644
+index 0000000..9aeb41b
+--- /dev/null
++++ b/server/forge/node-adapter.js
+@@ -0,0 +1,97 @@
++import { handleForge } from "./handle.js";
++import { openNeonStore } from "./neon-store.js";
++import { AiBufferError, createAiClient } from "ai-buffer";
++
++async function readRaw(req) {
++  if (typeof req.body === "string") return req.body;
++  if (Buffer.isBuffer(req.body)) return req.body.toString("utf8");
++  if (!req || typeof req[Symbol.asyncIterator] !== "function") return "";
++  const chunks = [];
++  for await (const chunk of req) chunks.push(Buffer.from(chunk));
++  return Buffer.concat(chunks).toString("utf8");
++}
++
++export async function completeChat({ apiKey, systemPrompt, message, history }) {
++  const ai = createAiClient({
++    provider: "openrouter",
++    getApiKey: () => apiKey,
++    appName: "Idea Forge",
++    siteUrl: process.env.APP_ORIGIN || "https://one-idea-forge-ai.vercel.app",
++    model: process.env.OPENROUTER_MODEL,
++    timeoutMs: 55_000,
++  });
++  try {
++    return await ai.streamChat({ message, systemPrompt, history });
++  } catch (error) {
++    if (error instanceof AiBufferError) {
++      const wrapped = new Error(error.message);
++      wrapped.code = error.code;
++      throw wrapped;
++    }
++    throw error;
++  }
++}
++
++function headerValue(headers, name) {
++  const value = headers?.[name] ?? headers?.[name.toLowerCase()];
++  if (Array.isArray(value)) return value[0] || "";
++  return value || "";
++}
++
++export async function forgeNodeHandler(req, res) {
++  let rawBody = "";
++  let body = {};
++  if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
++    body = req.body;
++    rawBody = JSON.stringify(req.body);
++  } else {
++    rawBody = await readRaw(req);
++    const type = headerValue(req.headers, "content-type");
++    if (rawBody && type.includes("application/json")) {
++      try {
++        body = JSON.parse(rawBody);
++      } catch {
++        body = {};
++      }
++    }
++  }
++  const url = new URL(req.url || "/", "https://idea-forge.local");
++  const queryPath = req.query?.path;
++  const fromQuery = Array.isArray(queryPath)
++    ? queryPath
++    : typeof queryPath === "string" && queryPath
++      ? [queryPath]
++      : [];
++  const path =
++    fromQuery.length > 0
++      ? fromQuery
++      : url.pathname.replace(/^\/api\/?/, "").split("/").filter(Boolean);
++  let result;
++  try {
++    const store = await openNeonStore();
++    const secure = headerValue(req.headers, "x-forwarded-proto").includes("https") || process.env.VERCEL === "1";
++    result = await handleForge({
++      method: req.method,
++      path,
++      headers: {
++        cookie: headerValue(req.headers, "cookie"),
++        "stripe-signature": headerValue(req.headers, "stripe-signature"),
++        "content-type": headerValue(req.headers, "content-type"),
++      },
++      body,
++      rawBody,
++      query: Object.fromEntries(url.searchParams.entries()),
++      store,
++      secure,
++      completeChat,
++    });
++  } catch (error) {
++    result = { status: 500, json: { error: error?.message || "Request failed" } };
++  }
++  res.statusCode = result.status;
++  for (const [key, value] of Object.entries(result.headers || {})) {
++    res.setHeader(key, value);
++  }
++  res.setHeader("Content-Type", "application/json");
++  res.end(JSON.stringify(result.json ?? {}));
++}
+diff --git a/server/forge/password.js b/server/forge/password.js
+new file mode 100644
+index 0000000..7c1961b
+--- /dev/null
++++ b/server/forge/password.js
+@@ -0,0 +1,20 @@
++import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
++import { promisify } from "node:util";
++
++const scryptAsync = promisify(scrypt);
++
++export async function hashPassword(password) {
++  const salt = randomBytes(16).toString("hex");
++  const hash = (await scryptAsync(password, salt, 64)).toString("hex");
++  return `${salt}:${hash}`;
++}
++
++export async function verifyPassword(password, stored) {
++  if (!stored || !stored.includes(":")) return false;
++  const [salt, hash] = stored.split(":");
++  const next = (await scryptAsync(password, salt, 64)).toString("hex");
++  const left = Buffer.from(hash, "hex");
++  const right = Buffer.from(next, "hex");
++  if (left.length !== right.length) return false;
++  return timingSafeEqual(left, right);
++}
+diff --git a/server/forge/schema.js b/server/forge/schema.js
+new file mode 100644
+index 0000000..f9d71e9
+--- /dev/null
++++ b/server/forge/schema.js
+@@ -0,0 +1,73 @@
++/** Idempotent tables for accounts, ideas, community, chat, and Stripe. */
++export const SCHEMA_STATEMENTS = [
++  `CREATE EXTENSION IF NOT EXISTS pgcrypto`,
++  `CREATE TABLE IF NOT EXISTS users (
++    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
++    email TEXT UNIQUE NOT NULL,
++    name TEXT,
++    image TEXT,
++    password_hash TEXT NOT NULL,
++    subscription_status TEXT NOT NULL DEFAULT 'free',
++    credits INTEGER NOT NULL DEFAULT 3,
++    last_credit_reset TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++    has_asked_migration BOOLEAN NOT NULL DEFAULT FALSE,
++    stripe_customer_id TEXT,
++    last_check_subscription_status_at TIMESTAMPTZ,
++    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
++  )`,
++  `CREATE TABLE IF NOT EXISTS sessions (
++    token_hash TEXT PRIMARY KEY,
++    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    expires_at TIMESTAMPTZ NOT NULL
++  )`,
++  `CREATE TABLE IF NOT EXISTS ideas (
++    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
++    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
++    prompt TEXT,
++    title TEXT,
++    description TEXT,
++    target_audience TEXT,
++    problem_solved TEXT,
++    unique_value_prop TEXT,
++    key_features JSONB,
++    monetization_strategies JSONB,
++    technical_feasibility TEXT,
++    market_validation_hints TEXT,
++    scores JSONB,
++    model_source TEXT,
++    creative_mode TEXT,
++    is_favorite BOOLEAN NOT NULL DEFAULT FALSE,
++    visibility TEXT NOT NULL DEFAULT 'private',
++    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
++  )`,
++  `CREATE TABLE IF NOT EXISTS shared_ideas (
++    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
++    idea_id UUID NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
++    shared_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    shared_with_email TEXT NOT NULL,
++    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++    UNIQUE (idea_id, shared_with_email)
++  )`,
++  `CREATE TABLE IF NOT EXISTS comments (
++    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
++    idea_id UUID NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
++    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    content TEXT NOT NULL,
++    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
++  )`,
++  `CREATE TABLE IF NOT EXISTS votes (
++    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
++    idea_id UUID NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
++    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++    UNIQUE (idea_id, user_id)
++  )`,
++  `CREATE TABLE IF NOT EXISTS chat_messages (
++    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
++    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    idea_id UUID REFERENCES ideas(id) ON DELETE SET NULL,
++    role TEXT NOT NULL,
++    content TEXT NOT NULL,
++    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
++  )`,
++];
+diff --git a/server/forge/session.js b/server/forge/session.js
+new file mode 100644
+index 0000000..37e0550
+--- /dev/null
++++ b/server/forge/session.js
+@@ -0,0 +1,34 @@
++import { createHash, randomBytes } from "node:crypto";
++
++export const SESSION_COOKIE = "idea_forge_session";
++const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
++
++export function newSessionToken() {
++  return randomBytes(32).toString("hex");
++}
++
++export function hashToken(token) {
++  return createHash("sha256").update(token).digest("hex");
++}
++
++export function sessionExpiry(now = Date.now()) {
++  return new Date(now + THIRTY_DAYS_MS).toISOString();
++}
++
++export function readCookie(header, name = SESSION_COOKIE) {
++  if (!header) return null;
++  const parts = header.split(";").map((part) => part.trim());
++  const match = parts.find((part) => part.startsWith(`${name}=`));
++  if (!match) return null;
++  return decodeURIComponent(match.slice(name.length + 1));
++}
++
++export function sessionCookie(token, { secure = false, maxAge = 60 * 60 * 24 * 30 } = {}) {
++  const flags = ["HttpOnly", "Path=/", "SameSite=Lax", `Max-Age=${maxAge}`];
++  if (secure) flags.push("Secure");
++  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; ${flags.join("; ")}`;
++}
++
++export function clearSessionCookie() {
++  return `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`;
++}
+diff --git a/server/index.ts b/server/index.ts
+index 87a7788..2f77707 100644
+--- a/server/index.ts
++++ b/server/index.ts
+@@ -15,6 +15,7 @@ import { serializeError } from 'serialize-error';
+ import ws from 'ws';
+ import NeonAdapter from './adapter';
+ import { getHTMLForErrorPage } from './get-html-for-error-page';
++import { attachForge } from './forge/hono-mount';
+ import { isAuthAction } from './is-auth-action';
+ import { API_BASENAME, api } from './route-builder';
+ neonConfig.webSocketConstructor = ws;
+@@ -218,6 +219,8 @@ if (process.env.AUTH_SECRET) {
+   );
+ }
+ 
++attachForge(app);
++
+ app.use('/api/auth/*', async (c, next) => {
+   if (isAuthAction(c.req.path)) {
+     return authHandler()(c, next);
+diff --git a/utils/heat/sipOpenRouter.js b/utils/heat/sipOpenRouter.js
+index 2023f62..17e9546 100644
+--- a/utils/heat/sipOpenRouter.js
++++ b/utils/heat/sipOpenRouter.js
+@@ -1,3 +1,5 @@
++import { AiBufferError, createAiClient } from "ai-buffer";
++
+ const SYSTEM =
+   'You help a human partner assay one idea. Return ONLY JSON: {"title":"","description":"","target_audience":"","key_features":[""],"scores":{"novelty":0,"feasibility":0,"market":0}} Scores 0-10. Concrete. Do not treat the human as a meter or the model as a tool.';
+ 
+@@ -32,27 +34,27 @@ function parseIdea(text, prompt, mode) {
+ }
+ 
+ export async function sipOpenRouter({ apiKey, prompt, mode }) {
+-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+-    method: "POST",
+-    headers: {
+-      Authorization: `Bearer ${apiKey}`,
+-      "Content-Type": "application/json",
+-    },
+-    body: JSON.stringify({
+-      model: "openai/gpt-4o-mini",
+-      messages: [
+-        { role: "system", content: SYSTEM },
+-        {
+-          role: "user",
+-          content: "Creative mode: " + (mode || "balanced") + ". Seed: " + prompt,
+-        },
+-      ],
+-    }),
++  const ai = createAiClient({
++    provider: "openrouter",
++    getApiKey: () => apiKey,
++    model: "openai/gpt-4o-mini",
++    appName: "Idea Forge",
++    siteUrl: "https://one-idea-forge-ai.vercel.app",
+   });
+-  if (res.status === 401 || res.status === 402 || res.status === 429 || !res.ok) {
+-    exhaust(res.status);
++  try {
++    const text = await ai.streamChat({
++      systemPrompt: SYSTEM,
++      message: "Creative mode: " + (mode || "balanced") + ". Seed: " + prompt,
++    });
++    return parseIdea(text, prompt, mode);
++  } catch (error) {
++    if (error instanceof AiBufferError) {
++      if (error.code === "payment_required") exhaust(402);
++      if (error.code === "rate_limited") exhaust(429);
++      if (error.code === "missing_key") exhaust(401);
++    }
++    const status = error?.status;
++    if (status === 401 || status === 402 || status === 429 || status) exhaust(status);
++    exhaust(500);
+   }
+-  const body = await res.json();
+-  const text = body?.choices?.[0]?.message?.content || "";
+-  return parseIdea(text, prompt, mode);
+ }
+diff --git a/utils/puter-stub.js b/utils/puter-stub.js
+new file mode 100644
+index 0000000..1e36fdb
+--- /dev/null
++++ b/utils/puter-stub.js
+@@ -0,0 +1 @@
++export const puter = undefined;
+diff --git a/utils/puterForge.js b/utils/puterForge.js
+index 4f30f6e..0f8447c 100644
+--- a/utils/puterForge.js
++++ b/utils/puterForge.js
+@@ -1,7 +1,10 @@
++import { createAiClient } from "ai-buffer";
+ import { FORGE_VISITOR_PUTER } from "./heat/flags.js";
+ 
+ const FREE_CAP = 3;
+ const STRIKE_KEY = "ideaforge_free_strikes";
++const ASSAY_PROMPT =
++  'You help a human partner assay one idea. Return ONLY JSON: {"title":"","description":"","target_audience":"","key_features":[""],"scores":{"novelty":0,"feasibility":0,"market":0}} Scores 0-10. Concrete. Do not treat the human as a meter or the model as a tool.';
+ 
+ export function remainingFreeStrikes() {
+   if (!FORGE_VISITOR_PUTER) return 0;
+@@ -42,7 +45,11 @@ function parseIdea(text, prompt, mode) {
+   const end = raw.lastIndexOf("}");
+   let data = {};
+   if (start >= 0 && end > start) {
+-    try { data = JSON.parse(raw.slice(start, end + 1)); } catch { data = {}; }
++    try {
++      data = JSON.parse(raw.slice(start, end + 1));
++    } catch {
++      data = {};
++    }
+   }
+   return {
+     id: "puter-assay",
+@@ -64,13 +71,17 @@ export async function forgeWithPuter(prompt, mode) {
+   if (remainingFreeStrikes() <= 0) {
+     throw new Error("Free strikes used. Upgrade, bring your own key, or stop.");
+   }
+-  const puter = await loadPuter();
+-  const system = 'You help a human partner assay one idea. Return ONLY JSON: {"title":"","description":"","target_audience":"","key_features":[""],"scores":{"novelty":0,"feasibility":0,"market":0}} Scores 0-10. Concrete. Do not treat the human as a meter or the model as a tool.';
+-  const res = await puter.ai.chat(
+-    [{ role: "system", content: system }, { role: "user", content: "Creative mode: " + (mode || "balanced") + ". Seed: " + prompt }],
+-    { model: "openai/gpt-5-nano" }
+-  );
+-  const text = typeof res === "string" ? res : (res?.message?.content || res?.text || JSON.stringify(res));
++  const ai = createAiClient({
++    provider: "puter",
++    model: "openai/gpt-5-nano",
++    loadPuter,
++  });
++  const info = await ai.getInfo();
++  if (!info.configured) await ai.signIn();
++  const text = await ai.streamChat({
++    systemPrompt: ASSAY_PROMPT,
++    message: "Creative mode: " + (mode || "balanced") + ". Seed: " + prompt,
++  });
+   bumpStrike();
+   return parseIdea(text, prompt, mode);
+ }
+diff --git a/utils/useAuth.js b/utils/useAuth.js
+index f35ebe3..a8304ff 100644
+--- a/utils/useAuth.js
++++ b/utils/useAuth.js
+@@ -1,53 +1,80 @@
+-import { useCallback } from 'react';
+-import { signIn, signOut } from "@auth/create/react";
++import { useCallback } from "react";
++
++function callbackFromWindow() {
++  if (typeof window === "undefined") return null;
++  return new URLSearchParams(window.location.search).get("callbackUrl");
++}
++
++async function postJson(path, body) {
++  const response = await fetch(path, {
++    method: "POST",
++    headers: { "Content-Type": "application/json" },
++    credentials: "include",
++    body: JSON.stringify(body ?? {}),
++  });
++  const data = await response.json().catch(() => ({}));
++  if (!response.ok) {
++    const error = new Error(data.error || "Request failed");
++    error.status = response.status;
++    throw error;
++  }
++  return data;
++}
+ 
+ function useAuth() {
+-  const callbackUrl = typeof window !== 'undefined' 
+-    ? new URLSearchParams(window.location.search).get('callbackUrl')
+-    : null;
+-
+-  const signInWithCredentials = useCallback((options) => {
+-    return signIn("credentials-signin", {
+-      ...options,
+-      callbackUrl: callbackUrl ?? options.callbackUrl
+-    });
+-  }, [callbackUrl])
+-
+-  const signUpWithCredentials = useCallback((options) => {
+-    return signIn("credentials-signup", {
+-      ...options,
+-      callbackUrl: callbackUrl ?? options.callbackUrl
+-    });
+-  }, [callbackUrl])
+-
+-  const signInWithGoogle = useCallback((options) => {
+-    return signIn("google", {
+-      ...options,
+-      callbackUrl: callbackUrl ?? options.callbackUrl
+-    });
+-  }, [callbackUrl]);
+-  const signInWithFacebook = useCallback((options) => {
+-    return signIn("facebook", options);
++  const callbackUrl = callbackFromWindow();
++
++  const signInWithCredentials = useCallback(
++    async (options) => {
++      await postJson("/api/account/signin", {
++        email: options.email,
++        password: options.password,
++      });
++      if (options.redirect !== false) {
++        window.location.href = callbackUrl ?? options.callbackUrl ?? "/";
++      }
++    },
++    [callbackUrl],
++  );
++
++  const signUpWithCredentials = useCallback(
++    async (options) => {
++      await postJson("/api/account/signup", {
++        email: options.email,
++        password: options.password,
++        name: options.name,
++      });
++      if (options.redirect !== false) {
++        window.location.href = callbackUrl ?? options.callbackUrl ?? "/";
++      }
++    },
++    [callbackUrl],
++  );
++
++  const rejectSocial = useCallback(async () => {
++    throw new Error("Google sign-in is not activated on this host. Use email and password.");
+   }, []);
+-  const signInWithTwitter = useCallback((options) => {
+-    return signIn("twitter", options);
++
++  const signOut = useCallback(async (options = {}) => {
++    try {
++      await postJson("/api/account/signout", {});
++    } catch {
++      // Leave the signed-in page even if the server is unreachable.
++    }
++    if (options.redirect !== false) {
++      window.location.href = options.callbackUrl || "/";
++    }
+   }, []);
+-  const signInWithApple = useCallback((options) => {
+-    return signIn("apple", {
+-      ...options,
+-      callbackUrl: callbackUrl ?? options.callbackUrl
+-    });
+-  }, [callbackUrl]);
+ 
+   return {
+     signInWithCredentials,
+     signUpWithCredentials,
+-    signInWithGoogle,
+-    signInWithFacebook,
+-    signInWithTwitter,
+-    signInWithApple,
++    signInWithGoogle: rejectSocial,
++    signInWithFacebook: rejectSocial,
++    signInWithTwitter: rejectSocial,
++    signInWithApple: rejectSocial,
+     signOut,
+-  }
++  };
+ }
+ 
+-export default useAuth;
+\ No newline at end of file
++export default useAuth;
+diff --git a/utils/useUser.js b/utils/useUser.js
+index 94c96ee..ac22a97 100644
+--- a/utils/useUser.js
++++ b/utils/useUser.js
+@@ -1,37 +1,34 @@
+-import * as React from 'react';
+-import { useSession } from "@auth/create/react";
+-
++import * as React from "react";
+ 
+ const useUser = () => {
+-  const sessionResult = useSession();
+-  const session = sessionResult?.data ?? null;
+-  const status = sessionResult?.status ?? 'unauthenticated';
+-  const id = session?.user?.id
+-
+-  const [user, setUser] = React.useState(session?.user ?? null);
++  const [user, setUser] = React.useState(null);
++  const [loading, setLoading] = React.useState(true);
+ 
+-  const fetchUser = React.useCallback(async (session) => {
+-  return session?.user;
+-}, [])
+-
+-  const refetchUser = React.useCallback(() => {
+-    if(process.env.NEXT_PUBLIC_CREATE_ENV === "PRODUCTION") {
+-      if (id) {
+-        fetchUser(session).then(setUser);
+-      } else {
++  const refetch = React.useCallback(async () => {
++    try {
++      const response = await fetch("/api/account/session", { credentials: "include" });
++      if (!response.ok) {
+         setUser(null);
++        return null;
+       }
++      const data = await response.json();
++      const next = data.user ?? null;
++      setUser(next);
++      return next;
++    } catch {
++      setUser(null);
++      return null;
++    } finally {
++      setLoading(false);
+     }
+-  }, [fetchUser, id])
++  }, []);
+ 
+-  React.useEffect(refetchUser, [refetchUser]);
++  React.useEffect(() => {
++    refetch();
++  }, [refetch]);
+ 
+-  if (process.env.NEXT_PUBLIC_CREATE_ENV !== "PRODUCTION") {
+-    return { user, data: session?.user || null, loading: status === 'loading', refetch: refetchUser };
+-  }
+-  return { user, data: user, loading: status === 'loading' || (status === 'authenticated' && !user), refetch: refetchUser };
++  return { user, data: user, loading, refetch };
+ };
+ 
+-export { useUser }
+-
+-export default useUser;
+\ No newline at end of file
++export { useUser };
++export default useUser;
+diff --git a/vercel.json b/vercel.json
+index b63b640..33e5758 100644
+--- a/vercel.json
++++ b/vercel.json
+@@ -8,6 +8,6 @@
+     { "source": "/trust", "destination": "/trust/index.html" },
+     { "source": "/privacy", "destination": "/privacy/index.html" },
+     { "source": "/terms", "destination": "/terms/index.html" },
+-    { "source": "/((?!assets/).*)", "destination": "/index.html" }
++    { "source": "/((?!assets/|api/).*)", "destination": "/index.html" }
+   ]
+ }
+diff --git a/vite.config.ts b/vite.config.ts
+index 3024eb1..3290bdd 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -36,6 +36,11 @@ export default defineConfig({
+     reactRouterHonoServer({
+       serverEntryPoint: './server/index.ts',
+       runtime: 'node',
++      // appDirectory is "." so the default dev exclude misses source files and
++      // the catch-all route returns HTML for /root.tsx. Keep /api on Hono.
++      dev: {
++        exclude: [/^\/(?!api\/).+\.[a-zA-Z0-9]+(\?.*)?$/],
++      },
+     }),
+     babel({
+       include: ['src/**/*.{js,jsx,ts,tsx}'], // or RegExp: /src\/.*\.[tj]sx?$/
+@@ -68,6 +73,7 @@ export default defineConfig({
+       'npm:stripe': 'stripe',
+       '@auth/create/react': '@hono/auth-js/react',
+       '@auth/create': path.resolve(__dirname, './src/auth/create.js'),
++      '@heyputer/puter.js': path.resolve(__dirname, 'utils/puter-stub.js'),
+       '@/utils': path.resolve(__dirname, 'utils'),
+       '@/hooks': path.resolve(__dirname, 'hooks'),
+       '@/components': path.resolve(__dirname, 'components'),
+-- 
+2.43.0
+
+
+From 9153051c07acadf8f545babed3dc2d5446bfe367 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 2 Oct 2026 17:40:57 +0000
+Subject: [PATCH 2/2] Route keyed model calls through Space Bunny Alpha, then
+ OpenRouter.
+
+Pin ai-buffer to the Space Bunny commit. Browser Puter stays the first heat. A saved or server OpenRouter key tries stealth/space-bunny-alpha before the named model.
+---
+ .env.example                   |  4 +++-
+ README.md                      |  2 +-
+ chat/page.jsx                  | 10 +++++-----
+ package-lock.json              |  7 ++++---
+ package.json                   |  4 ++--
+ server/forge/node-adapter.js   | 10 +++++-----
+ utils/heat/forgeRouter.js      | 28 +++++++++++++++++++++++++++
+ utils/heat/forgeRouter.test.js | 33 ++++++++++++++++++++++++++++++++
+ utils/heat/sipOpenRouter.js    | 35 ++++++++++++++++++++--------------
+ 9 files changed, 102 insertions(+), 31 deletions(-)
+ create mode 100644 utils/heat/forgeRouter.js
+ create mode 100644 utils/heat/forgeRouter.test.js
+
+diff --git a/.env.example b/.env.example
+index ae1c408..19e464e 100644
+--- a/.env.example
++++ b/.env.example
+@@ -21,8 +21,10 @@
+ # STRIPE_PRICE_ID=
+ 
+ # Optional server fallback for /api/generate and /api/chat.
+-# Browser Puter and a key kept in the browser run first. Do not commit a key.
++# Browser Puter runs first. A key kept in the browser tries Space Bunny Alpha, then the OpenRouter model.
++# The server key uses that same order. Do not commit a key.
+ # OPENROUTER_API_KEY=
++# OPENROUTER_MODEL=openai/gpt-4o-mini
+ 
+ # Partner Gift cashier (Idea Forge only; do not reuse on other products)
+ # PARTNER_DAILY_SIP_CAP=3
+diff --git a/README.md b/README.md
+index c413e76..ad417d6 100644
+--- a/README.md
++++ b/README.md
+@@ -19,6 +19,6 @@ Email and password live at `/api/account/signup` and `/api/account/signin`. The
+ 
+ Free accounts start with 3 assays a day. Pro skips that counter. Checkout is `/api/stripe/checkout` once `STRIPE_SECRET_KEY` is set. Point Stripe's webhook at `/api/stripe/webhook` with `STRIPE_WEBHOOK_SECRET`.
+ 
+-`/community` lists public ideas. Signed-in partners can publish, vote, and comment. `/chat` tries browser Puter, then an OpenRouter key saved only in that browser, then `OPENROUTER_API_KEY` on the server. Model calls go through [ai-buffer](https://github.com/noahnemo-rgb/ai-buffer-template). The host key is optional. Puter and a visitor's own key stay the default heat.
++`/community` lists public ideas. Signed-in partners can publish, vote, and comment. `/chat` tries browser Puter first. When this browser holds an OpenRouter key, [ai-buffer](https://github.com/noahnemo-rgb/ai-buffer-template) tries Space Bunny Alpha (`stealth/space-bunny-alpha`), then the OpenRouter model. `OPENROUTER_API_KEY` on the server is the same two-step fallback. The host key is optional. Puter and a visitor's own key stay the default heat. The `ai-buffer` dependency is pinned to the Space Bunny commit until that upgrade is on `main`.
+ 
+ `npm test` covers the account, credit, community, chat, and Stripe-off paths without calling a model or a database.
+diff --git a/chat/page.jsx b/chat/page.jsx
+index 2a88a13..e74daac 100644
+--- a/chat/page.jsx
++++ b/chat/page.jsx
+@@ -3,6 +3,7 @@
+ import { useEffect, useState } from "react";
+ import { ArrowLeft, Send, Sparkles } from "lucide-react";
+ import { createAiClient } from "ai-buffer";
++import { createKeyedRouter } from "@/utils/heat/forgeRouter";
+ import { FORGE_VISITOR_PUTER } from "@/utils/heat/flags";
+ import { loadPuter } from "@/utils/puterForge";
+ import useUser from "@/utils/useUser";
+@@ -64,13 +65,12 @@ export default function ChatPage() {
+   const askKey = async (message, history) => {
+     const apiKey = key.trim();
+     if (!apiKey) return null;
+-    const ai = createAiClient({
+-      provider: "openrouter",
+-      getApiKey: () => apiKey,
++    const router = createKeyedRouter({
++      apiKey,
+       appName: "Idea Forge",
+       siteUrl: window.location.origin,
+     });
+-    return ai.streamChat({ message, history, systemPrompt: CHAT_PROMPT });
++    return router.streamChat({ message, history, systemPrompt: CHAT_PROMPT });
+   };
+ 
+   const onSubmit = async (event) => {
+@@ -133,7 +133,7 @@ export default function ChatPage() {
+           <div>
+             <h1 className="text-3xl font-bold">Chat</h1>
+             <p className="text-white/50 text-sm">
+-              Puter in the browser, your own OpenRouter key, or the server key if one is set.
++              Puter in the browser first. A key saved here tries Space Bunny Alpha, then your OpenRouter model. The server key is the last stop.
+             </p>
+           </div>
+         </div>
+diff --git a/package-lock.json b/package-lock.json
+index 674801d..3e4c272 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -24,7 +24,7 @@
+ 				"@tanstack/react-table": "^8.21.2",
+ 				"@types/babel__core": "^7.20.5",
+ 				"@vis.gl/react-google-maps": "^0.8.3",
+-				"ai-buffer": "github:noahnemo-rgb/ai-buffer-template",
++				"ai-buffer": "github:noahnemo-rgb/ai-buffer-template#d0c7cbc40df991805efaf64223a00fc3fbb72e15",
+ 				"argon2": "^0.43.0",
+ 				"classnames": "^2.5.1",
+ 				"clean-stack": "^5.2.0",
+@@ -6240,8 +6240,9 @@
+ 			}
+ 		},
+ 		"node_modules/ai-buffer": {
+-			"version": "0.2.0",
+-			"resolved": "git+ssh://git@github.com/noahnemo-rgb/ai-buffer-template.git#368db96eb920b4266b05b763458594f31367541b",
++			"version": "0.3.0",
++			"resolved": "git+ssh://git@github.com/noahnemo-rgb/ai-buffer-template.git#d0c7cbc40df991805efaf64223a00fc3fbb72e15",
++			"integrity": "sha512-tp2RSuMQxCyysRz7Kg6qICF354BRw6P+8+QT/tyTlixIXRlb8cMC0cXse73oR15/QVGteYwGlSktcie/5zJ7zA==",
+ 			"license": "MIT",
+ 			"engines": {
+ 				"node": ">=18"
+diff --git a/package.json b/package.json
+index d97c1ed..7089805 100644
+--- a/package.json
++++ b/package.json
+@@ -8,10 +8,9 @@
+ 		"start": "react-router-serve ./build/server/index.js",
+ 		"typecheck": "react-router typegen && tsc --noEmit",
+ 		"heat:local": "node scripts/heat-local.mjs",
+-		"test": "node --test server/forge/handle.test.js utils/heat/donatorSequencer.test.mjs"
++		"test": "node --test server/forge/handle.test.js utils/heat/donatorSequencer.test.mjs utils/heat/forgeRouter.test.js"
+ 	},
+ 	"dependencies": {
+-		"ai-buffer": "github:noahnemo-rgb/ai-buffer-template",
+ 		"@auth/core": "^0.37.2",
+ 		"@babel/generator": "^7.27.1",
+ 		"@chakra-ui/react": "2.8.2",
+@@ -30,6 +29,7 @@
+ 		"@tanstack/react-table": "^8.21.2",
+ 		"@types/babel__core": "^7.20.5",
+ 		"@vis.gl/react-google-maps": "^0.8.3",
++		"ai-buffer": "github:noahnemo-rgb/ai-buffer-template#d0c7cbc40df991805efaf64223a00fc3fbb72e15",
+ 		"argon2": "^0.43.0",
+ 		"classnames": "^2.5.1",
+ 		"clean-stack": "^5.2.0",
+diff --git a/server/forge/node-adapter.js b/server/forge/node-adapter.js
+index 9aeb41b..eacd6b1 100644
+--- a/server/forge/node-adapter.js
++++ b/server/forge/node-adapter.js
+@@ -1,6 +1,7 @@
+ import { handleForge } from "./handle.js";
+ import { openNeonStore } from "./neon-store.js";
+-import { AiBufferError, createAiClient } from "ai-buffer";
++import { AiBufferError } from "ai-buffer";
++import { createKeyedRouter } from "../../utils/heat/forgeRouter.js";
+ 
+ async function readRaw(req) {
+   if (typeof req.body === "string") return req.body;
+@@ -12,16 +13,15 @@ async function readRaw(req) {
+ }
+ 
+ export async function completeChat({ apiKey, systemPrompt, message, history }) {
+-  const ai = createAiClient({
+-    provider: "openrouter",
+-    getApiKey: () => apiKey,
++  const router = createKeyedRouter({
++    apiKey,
+     appName: "Idea Forge",
+     siteUrl: process.env.APP_ORIGIN || "https://one-idea-forge-ai.vercel.app",
+     model: process.env.OPENROUTER_MODEL,
+     timeoutMs: 55_000,
+   });
+   try {
+-    return await ai.streamChat({ message, systemPrompt, history });
++    return await router.streamChat({ message, systemPrompt, history });
+   } catch (error) {
+     if (error instanceof AiBufferError) {
+       const wrapped = new Error(error.message);
+diff --git a/utils/heat/forgeRouter.js b/utils/heat/forgeRouter.js
+new file mode 100644
+index 0000000..be25022
+--- /dev/null
++++ b/utils/heat/forgeRouter.js
+@@ -0,0 +1,28 @@
++import { createCallRouter } from "ai-buffer";
++
++/**
++ * Same OpenRouter key, two routes. Space Bunny Alpha is first.
++ * Puter stays outside this router so the browser can try it before any key.
++ */
++export function createKeyedRouter({
++  apiKey,
++  model,
++  siteUrl,
++  appName = "Idea Forge",
++  timeoutMs,
++  fetchImpl,
++}) {
++  const shared = {
++    getApiKey: () => apiKey,
++    appName,
++    siteUrl,
++    timeoutMs,
++    fetchImpl,
++  };
++  const namedModel = typeof model === "string" && model.trim() ? model.trim() : undefined;
++  return createCallRouter({
++    spaceBunny: shared,
++    openrouter: namedModel ? { ...shared, model: namedModel } : shared,
++    order: ["space-bunny", "openrouter"],
++  });
++}
+diff --git a/utils/heat/forgeRouter.test.js b/utils/heat/forgeRouter.test.js
+new file mode 100644
+index 0000000..d6be766
+--- /dev/null
++++ b/utils/heat/forgeRouter.test.js
+@@ -0,0 +1,33 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { AiBufferError } from "ai-buffer";
++import { createKeyedRouter } from "./forgeRouter.js";
++
++function sse(text) {
++  const body = `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\ndata: [DONE]\n`;
++  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
++}
++
++test("a browser or server key tries Space Bunny Alpha, then the named OpenRouter model", async () => {
++  const models = [];
++  const router = createKeyedRouter({
++    apiKey: "sk-test",
++    model: "openai/gpt-4o-mini",
++    siteUrl: "https://one-idea-forge-ai.vercel.app",
++    timeoutMs: 1000,
++    fetchImpl: async (_input, init) => {
++      const payload = JSON.parse(String(init?.body));
++      models.push(payload.model);
++      if (models.length === 1) return new Response("slow down", { status: 429 });
++      return sse("fallback");
++    },
++  });
++
++  assert.equal(await router.streamChat({ message: "Sketch one idea" }), "fallback");
++  assert.deepEqual(models, ["stealth/space-bunny-alpha", "openai/gpt-4o-mini"]);
++  assert.equal(router.route("space-bunny").id, "space-bunny");
++  assert.throws(
++    () => router.route("puter"),
++    (error) => error instanceof AiBufferError && error.code === "provider_error",
++  );
++});
+diff --git a/utils/heat/sipOpenRouter.js b/utils/heat/sipOpenRouter.js
+index 17e9546..076188f 100644
+--- a/utils/heat/sipOpenRouter.js
++++ b/utils/heat/sipOpenRouter.js
+@@ -1,4 +1,5 @@
+-import { AiBufferError, createAiClient } from "ai-buffer";
++import { AiBufferError } from "ai-buffer";
++import { createKeyedRouter } from "./forgeRouter.js";
+ 
+ const SYSTEM =
+   'You help a human partner assay one idea. Return ONLY JSON: {"title":"","description":"","target_audience":"","key_features":[""],"scores":{"novelty":0,"feasibility":0,"market":0}} Scores 0-10. Concrete. Do not treat the human as a meter or the model as a tool.';
+@@ -7,7 +8,7 @@ function exhaust(status) {
+   throw Object.assign(new Error("exhaust"), { exhaust: true, status });
+ }
+ 
+-function parseIdea(text, prompt, mode) {
++function parseIdea(text, prompt, mode, source) {
+   const raw = String(text || "");
+   const start = raw.indexOf("{");
+   const end = raw.lastIndexOf("}");
+@@ -20,33 +21,39 @@ function parseIdea(text, prompt, mode) {
+     }
+   }
+   return {
+-    id: "openrouter-donor-assay",
++    id: source === "space-bunny" ? "space-bunny-assay" : "openrouter-donor-assay",
+     title: data.title || "Assay",
+     description: data.description || raw.slice(0, 800) || prompt,
+     target_audience: data.target_audience || "Not specified",
+     key_features: Array.isArray(data.key_features)
+       ? data.key_features.slice(0, 6)
+-      : ["Named helper: OpenRouter donor coat"],
++      : [source === "space-bunny" ? "Named helper: Space Bunny Alpha" : "Named helper: OpenRouter donor coat"],
+     scores: data.scores || { novelty: 0, feasibility: 0, market: 0 },
+-    model_source: "openrouter-donor",
++    model_source: source,
+     creative_mode: mode || "balanced",
+   };
+ }
+ 
++const FAILOVER = new Set(["missing_key", "signed_out", "rate_limited", "payment_required", "provider_error"]);
++
+ export async function sipOpenRouter({ apiKey, prompt, mode }) {
+-  const ai = createAiClient({
+-    provider: "openrouter",
+-    getApiKey: () => apiKey,
++  const router = createKeyedRouter({
++    apiKey,
+     model: "openai/gpt-4o-mini",
+-    appName: "Idea Forge",
+     siteUrl: "https://one-idea-forge-ai.vercel.app",
+   });
++  const message = "Creative mode: " + (mode || "balanced") + ". Seed: " + prompt;
+   try {
+-    const text = await ai.streamChat({
+-      systemPrompt: SYSTEM,
+-      message: "Creative mode: " + (mode || "balanced") + ". Seed: " + prompt,
+-    });
+-    return parseIdea(text, prompt, mode);
++    let source = "space-bunny";
++    let text;
++    try {
++      text = await router.streamChat({ route: "space-bunny", systemPrompt: SYSTEM, message });
++    } catch (error) {
++      if (!(error instanceof AiBufferError) || !FAILOVER.has(error.code)) throw error;
++      source = "openrouter-donor";
++      text = await router.streamChat({ route: "openrouter", systemPrompt: SYSTEM, message });
++    }
++    return parseIdea(text, prompt, mode, source);
+   } catch (error) {
+     if (error instanceof AiBufferError) {
+       if (error.code === "payment_required") exhaust(402);
+-- 
+2.43.0
+
