@@ -14,7 +14,7 @@ export interface OpenRouterStreamOptions {
   timeoutSignal?: AbortSignal;
   onChunk?: (text: string) => void;
   fetchImpl?: typeof fetch;
-  /** Extra JSON fields, such as Space Bunny Alpha's reasoning effort. */
+  /** Extra JSON fields, such as Space Bunny Alpha's reasoning effort or fullPrecisionExtra(). */
   extra?: Record<string, unknown>;
 }
 

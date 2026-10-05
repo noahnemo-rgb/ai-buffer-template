@@ -27,6 +27,8 @@ export {
 } from "./space-bunny.js";
 export type { SpaceBunnyReasoningEffort } from "./space-bunny.js";
 export { OPENROUTER_URL, streamOpenRouter } from "./openrouter.js";
+export { FULL_PRECISION_QUANTIZATIONS, fullPrecisionExtra } from "./precision.js";
+export type { FullPrecisionExtra, FullPrecisionQuantization } from "./precision.js";
 export { drainOpenRouterSse } from "./sse.js";
 export { createLocalStorageStore, createMemoryStore, createOpenRouterKeyStore } from "./store.js";
 export type { OpenRouterKeyStore } from "./store.js";

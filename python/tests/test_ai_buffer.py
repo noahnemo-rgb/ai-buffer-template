@@ -7,7 +7,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ai_buffer import SPACE_BUNNY_MODEL, build_messages, drain_openrouter_sse, stream_openrouter, stream_space_bunny
+from ai_buffer import (
+    SPACE_BUNNY_MODEL,
+    build_messages,
+    drain_openrouter_sse,
+    full_precision_extra,
+    stream_openrouter,
+    stream_space_bunny,
+)
 from ai_buffer.messages import DEFAULT_SYSTEM_PROMPT
 
 
@@ -122,6 +129,36 @@ class StreamTests(unittest.TestCase):
         assert isinstance(payload, dict)
         self.assertEqual(payload["model"], SPACE_BUNNY_MODEL)
         self.assertEqual(payload["reasoning"], {"effort": "medium"})
+
+    def test_full_precision_extra_filters_open_weight_hosts(self) -> None:
+        model = "meta-llama/llama-3.1-70b-instruct"
+        self.assertEqual(
+            full_precision_extra(model),
+            {"provider": {"quantizations": ["bf16", "fp16", "fp32"]}},
+        )
+        for refused in ("openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", SPACE_BUNNY_MODEL, f"{model}:free"):
+            with self.assertRaises(RuntimeError):
+                full_precision_extra(refused)
+
+        seen: dict[str, object] = {}
+
+        def opener(url: str, payload: bytes, headers: dict[str, str], timeout_sec: float) -> _FakeBody:
+            seen["payload"] = json.loads(payload.decode("utf-8"))
+            return _FakeBody([event("precise").encode(), b"data: [DONE]\n"])
+
+        chunks = list(
+            stream_openrouter(
+                api_key="sk-test",
+                model=model,
+                messages=[{"role": "user", "content": "Hi"}],
+                extra=full_precision_extra(model),
+                open_stream=opener,
+            )
+        )
+        self.assertEqual(chunks, ["precise"])
+        payload = seen["payload"]
+        assert isinstance(payload, dict)
+        self.assertEqual(payload["provider"], {"quantizations": ["bf16", "fp16", "fp32"]})
 
     def test_missing_key(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "OPENROUTER_API_KEY"):

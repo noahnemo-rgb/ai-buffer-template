@@ -212,6 +212,37 @@ This package does not add a chat window by itself. The app still has to:
 
 The default model is `openai/gpt-4o-mini`, the same id Syntax IDE already uses. Puter and OpenRouter do not share one catalog. On Expo, set `puterModel` and `openrouterModel` separately. On a plain client, pass `model` to `createPuterClient` or `createOpenRouterClient`.
 
+## Open-weight precision
+
+OpenRouter's default routing prefers the cheaper host. For an open-weight model that host is often an 8-bit or 4-bit copy. `fullPrecisionExtra(model)` asks for `bf16`, `fp16`, or `fp32`. If no host offers those, the call fails. Pass it as `extra` on the OpenRouter route. Leave it off Puter, Space Bunny Alpha, OpenAI, Anthropic, and any `:free` or `:floor` model id.
+
+```ts
+import { createAiClient, fullPrecisionExtra } from "ai-buffer";
+
+const model = "meta-llama/llama-3.1-70b-instruct";
+const ai = createAiClient({
+  provider: "openrouter",
+  getApiKey: () => process.env.OPENROUTER_API_KEY,
+  model,
+  extra: fullPrecisionExtra(model),
+});
+```
+
+Python uses the same object as `extra`:
+
+```python
+from ai_buffer import full_precision_extra, stream_openrouter
+
+model = "meta-llama/llama-3.1-70b-instruct"
+for chunk in stream_openrouter(
+    api_key=os.environ["OPENROUTER_API_KEY"],
+    model=model,
+    messages=messages,
+    extra=full_precision_extra(model),
+):
+    print(chunk, end="", flush=True)
+```
+
 ## Develop this repo
 
 ```bash
