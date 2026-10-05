@@ -1,6 +1,6 @@
 {
   "name": "ai-buffer",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Shared OpenRouter, Puter, and Space Bunny Alpha chat adapter. One call, your own instructions, any app.",
   "type": "module",
   "main": "./dist/index.js",
