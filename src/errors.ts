@@ -1,3 +1,5 @@
+import { redactSecrets } from "./redact.js";
+
 export type AiErrorCode =
   | "signed_out"
   | "missing_key"
@@ -23,13 +25,14 @@ export function openRouterHttpError(status: number, body: string): Error {
 }
 
 export function providerHttpError(provider: string, status: number, body: string): Error {
-  const error = new Error(`${provider} HTTP ${status}: ${body.slice(0, 300)}`) as Error & { status: number };
+  const safe = redactSecrets(body).slice(0, 300);
+  const error = new Error(`${provider} HTTP ${status}: ${safe}`) as Error & { status: number };
   error.status = status;
   return error;
 }
 
 export function formatAiError(error: unknown): string {
-  if (error instanceof AiBufferError) return error.message;
+  if (error instanceof AiBufferError) return redactSecrets(error.message);
   if (error instanceof Error && error.name === "TimeoutError") {
     return "The AI request timed out.";
   }
@@ -47,9 +50,9 @@ export function formatAiError(error: unknown): string {
     return "This AI feature requires a paid provider plan.";
   }
   if (typeof err?.message === "string" && err.message.trim()) {
-    return err.message;
+    return redactSecrets(err.message);
   }
-  return String(error);
+  return redactSecrets(String(error));
 }
 
 export function codeFor(error: unknown): AiErrorCode {
@@ -72,6 +75,9 @@ export function codeFor(error: unknown): AiErrorCode {
 }
 
 export function asAiError(error: unknown): AiBufferError {
-  if (error instanceof AiBufferError) return error;
+  if (error instanceof AiBufferError) {
+    const message = redactSecrets(error.message);
+    return message === error.message ? error : new AiBufferError(error.code, message);
+  }
   return new AiBufferError(codeFor(error), formatAiError(error));
 }

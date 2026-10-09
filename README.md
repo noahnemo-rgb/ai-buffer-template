@@ -80,7 +80,7 @@ A full screen sketch is in `examples/expo-app.ts`.
 
 Put an OpenRouter key in the phone's secure store, or in the server environment as `OPENROUTER_API_KEY`. A website should use Puter, or it should call your server. A key placed in the website's JavaScript can be copied by anyone who opens the page.
 
-`AI_GATEWAY_API_KEY`, `VERCEL_OIDC_TOKEN`, `GEMINI_API_KEY`, `NVIDIA_API_KEY`, and `LLM_API_KEY` follow the same rule. Keep them in the server environment or in device secure storage.
+`AI_GATEWAY_API_KEY`, `VERCEL_OIDC_TOKEN`, `GEMINI_API_KEY`, `NVIDIA_API_KEY`, and `LLM_API_KEY` follow the same rule. Keep them in the server environment or in device secure storage. Do not write them to `localStorage` or `sessionStorage`. The [Security](#security) section is the checklist.
 
 ## Errors the screen can branch on
 
@@ -308,7 +308,7 @@ for chunk in stream_openrouter(
 
 There is no connections-connector screen in this repo. ONE-SeedFeast has an `/assist` screen and `CONNECTION_LABELS` for Puter, Space Bunny Alpha, and OpenRouter. ONE-Syntax-IDE has an AI settings modal for Puter sign-in and an OpenRouter key. Neither is a reusable provider list, so the list lives here.
 
-`createProviderSelectionStore` saves the active provider and each provider's model in the store you pass. It does not save API keys. `loadDashboard` returns one row per provider. `createClientFromSelection` and `createRouterFromSelection` pass that choice to `createAiClient` and `createCallRouter`. Space Bunny Alpha keeps the model id `stealth/space-bunny-alpha`.
+`createProviderSelectionStore` saves the active provider and each provider's model in the store you pass. It does not save API keys. A value that looks like a key is rejected. `loadDashboard` returns one row per provider. A `keyHints` entry is reduced to `••••` plus the last 4 characters on `row.keyHint`. `createClientFromSelection` and `createRouterFromSelection` pass that choice to `createAiClient` and `createCallRouter`. Space Bunny Alpha keeps the model id `stealth/space-bunny-alpha`.
 
 ```ts
 import {
@@ -345,7 +345,7 @@ npm run build
 python3 -m http.server 8765
 ```
 
-Open `http://127.0.0.1:8765/examples/dashboard.html`. The page reads `localStorage`. The sample probe marks Puter and Vercel Gateway as configured. `examples/expo-dashboard.ts` is the phone sketch: the same store, backed by `expo-secure-store`.
+Open `http://127.0.0.1:8765/examples/dashboard.html`. The page reads `localStorage` for the provider and the model only. The sample probe marks Puter and Vercel Gateway as configured, and shows `••••ab12` on the Vercel Gateway row. `examples/expo-dashboard.ts` is the phone sketch: the same selection store, backed by `expo-secure-store`. On a phone, provider keys also go in `expo-secure-store`. On the web, they do not.
 
 ## What each app still owns
 
@@ -361,6 +361,113 @@ This package does not add a chat window by itself. The app still has to:
 ## Model names
 
 The default model is `openai/gpt-4o-mini`, the same id Syntax IDE already uses. Puter and OpenRouter do not share one catalog. On Expo, set `puterModel` and `openrouterModel` separately. On a plain client, pass `model` to `createPuterClient` or `createOpenRouterClient`.
+
+## Security
+
+Owner keys and user keys take different paths. Neither path puts a raw key in a browser bundle, in `localStorage`, in `sessionStorage`, in a URL, or in an error string.
+
+### Where each key lives
+
+| Key | Where it is stored | Who can read it |
+| --- | --- | --- |
+| `OPENROUTER_API_KEY` | Server environment | The server proxy, when the caller asks for OpenRouter or Space Bunny Alpha |
+| `AI_GATEWAY_API_KEY`, or `VERCEL_OIDC_TOKEN` when the API key is empty | Server environment | The server proxy, when the caller asks for Vercel Gateway |
+| `GEMINI_API_KEY` | Server environment | The server proxy. The Gemini request sends it as the `x-goog-api-key` header. It is not a query parameter. |
+| `NVIDIA_API_KEY` | Server environment | The server proxy, when the caller asks for NVIDIA NIM |
+| `LLM_API_KEY` | Server environment | The server proxy, when the caller asks for LLMAPI |
+| `AI_BUFFER_VAULT_KEY` | Server environment. 32 bytes, base64. | The vault, to encrypt and decrypt user keys. It is not an AI provider key. |
+| A user's own provider key on a phone | `expo-secure-store`, through `createProviderKeyStore` or `createOpenRouterKeyStore` | That device |
+| A user's own provider key on the web | Memory for this page load (`createMemoryKeyStore`), or the server vault | The page until reload, or the server after encryption |
+
+Puter does not use one of these keys. The person signs in in the browser.
+
+`createLocalStorageStore` is for the dashboard selection (provider id and model id). Passing it to `createOpenRouterKeyStore` or `createProviderKeyStore` throws. `createOpenRouterKeyStore` also refuses to save a key-shaped string as the model.
+
+### Server proxy
+
+Browsers and Expo web call your server. The server holds the owner keys and calls the provider.
+
+Node:
+
+```ts
+import { createServer } from "node:http";
+import { createMemoryRateLimit, createNodeAiProxy } from "ai-buffer";
+
+createServer(
+  createNodeAiProxy({
+    allowedOrigins: ["https://app.example"],
+    allowMissingOrigin: false,
+    providers: ["openrouter", "gemini"],
+    models: {
+      openrouter: ["openai/gpt-4o-mini"],
+      gemini: ["gemini-3.8-flash"],
+    },
+    rateLimit: createMemoryRateLimit({ limit: 30, windowMs: 60_000 }),
+  }),
+).listen(8787);
+```
+
+Python (`examples/proxy_route.py`):
+
+```python
+from ai_buffer import handle_ai_proxy
+
+status, headers, body = handle_ai_proxy(
+    method="POST",
+    headers=request_headers,
+    body=raw_body,
+    allowed_origins=["https://app.example"],
+    models={"gemini": ["gemini-3.8-flash"]},
+    env=os.environ,
+    client_ip=client_ip,
+)
+```
+
+The JSON body is `{ "provider", "model", "messages" }` or `{ "provider", "model", "message" }`. Optional `byok` is a user key for that request only. The proxy does not store it and does not copy it into the response. Set `allowByok: false` when every call must use the owner key.
+
+`allowedOrigins` is an exact list of `Origin` header values. A missing `Origin` is rejected unless `allowMissingOrigin` is true. `providers` and `models` are allowlists. `puter` is rejected. Space Bunny Alpha always uses `stealth/space-bunny-alpha`.
+
+`rateLimit` receives `{ ip, userId, provider }` in Node and `(ip, user_id, provider)` in Python. Return false to reject the call. `createMemoryRateLimit` / `create_memory_rate_limit` is an in-process counter keyed by user id when you pass one, otherwise by IP. Pass `resolveUser` from your session. The proxy does not trust a user id in the JSON body.
+
+`examples/node-proxy.mjs` is the same Node listener.
+
+### Web BYOK vault
+
+On the web, either keep the key in `createMemoryKeyStore` (it disappears on reload) or send it once to `createVaultHandler` / `create_key_vault`.
+
+The vault encrypts with AES-256-GCM. The server key is `AI_BUFFER_VAULT_KEY` (32 bytes, base64). The stored record is the ciphertext, the nonce, and the last 4 characters. `put` and `status` return `{ configured, hint }`. `hint` looks like `••••abcd`. `read` returns the raw key for the server proxy only. There is no HTTP response that returns the raw key.
+
+Node: `vaultKeyFromString(process.env.AI_BUFFER_VAULT_KEY)` and `createKeyVault({ encryptionKey, storage })`. Python: `pip install cryptography`, then `ai_buffer.vault.create_key_vault`. Bind `resolveUser` to the signed-in user before mounting `createVaultHandler`.
+
+Pass the same `vault` and `resolveUser` to `createAiProxy` if the browser should chat with the stored user key instead of the owner key.
+
+### Errors and logs
+
+`redactSecrets` / `redact_secrets` replaces bearer tokens, `sk-` / `nvapi-` / `AIza` keys, `key=` query values, and JSON key fields with `[redacted]`. HTTP error bodies, SSE error events, and `formatAiError` go through it. Do not log request headers or the `byok` field yourself.
+
+The dashboard shows `configured`, `not configured`, and the masked hint. It does not show the key.
+
+### Rotation
+
+1. Revoke the key at the provider.
+2. Replace the server environment variable, or `vault.delete` the user record, and redeploy.
+3. On a phone, `clearKey` and `setKey` on the secure-store helper replace the device copy.
+4. A memory key is gone when the page closes. Ask for it again.
+
+### Reporting a leak
+
+Revoke the provider key first. Then open a private security advisory on this repository (GitHub Security tab, Report a vulnerability). Include the provider name, the time you revoked the key, and where it was exposed. Do not paste the key into the advisory.
+
+### Checklist for an app
+
+1. Owner keys exist only in the server environment. The website and Expo web call `createAiProxy` or `handle_ai_proxy`.
+2. Set `allowedOrigins`. Pass a rate-limit hook. Allowlist the providers and models you actually call.
+3. On a phone, save user keys with `expo-secure-store` through `createProviderKeyStore` or `createOpenRouterKeyStore`.
+4. On the web, use `createMemoryKeyStore` or the vault. Do not pass `createLocalStorageStore` a key. Do not put a key in `sessionStorage`.
+5. Show `configured`, `not configured`, and `maskKeyHint`. Do not render `getKey()`.
+6. The selection store may use `localStorage` for the provider id and the model id only.
+7. Gemini calls use the `x-goog-api-key` header. Do not build a URL that contains the key.
+8. After a leak, rotate as above and report it. Do not send the key in the report.
 
 ## Develop this repo
 

@@ -14,6 +14,8 @@ import urllib.request
 from collections.abc import Callable, Iterator
 from typing import Any
 
+from .redact import redact_secrets
+
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 GEMINI_MISSING_KEY = "Gemini API key is not set. Set GEMINI_API_KEY."
@@ -71,7 +73,7 @@ def drain_gemini_sse(full_text: str, parsed_through: int) -> tuple[str, int]:
                 message = error.get("message") or "Gemini API stream error"
             else:
                 message = "Gemini API stream error"
-            raise RuntimeError(str(message))
+            raise RuntimeError(redact_secrets(str(message)))
         candidates = chunk.get("candidates") or []
         if not candidates:
             continue
@@ -128,4 +130,5 @@ def stream_gemini(
                     yield text
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Gemini API HTTP {error.code}: {detail[:300]}") from error
+        safe = redact_secrets(detail)[:300]
+        raise RuntimeError(f"Gemini API HTTP {error.code}: {safe}") from error

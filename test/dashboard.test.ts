@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { maskKeyHint } from "../src/redact.ts";
 import { createMemoryStore } from "../src/store.ts";
 import {
   createClientFromSelection,
@@ -65,6 +66,7 @@ describe("provider dashboard", () => {
     const gemini = rows.find((row) => row.id === "gemini");
     assert.equal(gemini?.activeLabel, "active");
     assert.equal(gemini?.model, "gemini-3.8-flash");
+    assert.ok(rows.every((row) => row.keyHint === ""));
     assert.equal(gemini?.configured, false);
     assert.deepEqual(await selection.getSelection(), { provider: "gemini", model: "gemini-3.8-flash" });
   });
@@ -120,6 +122,16 @@ describe("provider dashboard", () => {
     );
     assert.equal(await router.streamChat({ message: "Hi" }), "bunny");
     assert.equal(bunnyModel, SPACE_BUNNY_MODEL);
+  });
+
+  it("shows a masked hint and does not copy a full key onto the row", async () => {
+    const owner = "sk-testOWNERKEY1234567890abcd";
+    const selection = createProviderSelectionStore(createMemoryStore());
+    const rows = await loadDashboard(selection, { gatewayKey: true, keyHints: { "vercel-gateway": owner } });
+    const gateway = rows.find((row) => row.id === "vercel-gateway");
+    assert.equal(gateway?.keyHint, maskKeyHint(owner));
+    assert.equal(gateway?.keyHint, "••••abcd");
+    assert.equal(JSON.stringify(rows).includes(owner), false);
   });
 
   it("refuses a selected route that was not given credentials", () => {

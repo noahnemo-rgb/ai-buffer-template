@@ -1,0 +1,11 @@
+title = "ai-buffer"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Unit tests use short fake keys. examples/, src/, and python/ai_buffer/ stay scanned."
+paths = [
+  '''(^|/)test/''',
+  '''(^|/)python/tests/''',
+]
