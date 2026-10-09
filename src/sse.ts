@@ -1,3 +1,5 @@
+import { redactSecrets } from "./redact.js";
+
 export interface SseDelta {
   text: string;
   parsedThrough: number;
@@ -37,7 +39,7 @@ export function drainOpenRouterSse(fullText: string, parsedThrough: number, prov
     }
     if (chunk.error) {
       const message = typeof chunk.error === "string" ? chunk.error : chunk.error.message;
-      throw new Error(message || `${providerName} stream error`);
+      throw new Error(redactSecrets(message || `${providerName} stream error`));
     }
     const content = chunk.choices?.[0]?.delta?.content;
     if (content) text += content;

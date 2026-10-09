@@ -8,6 +8,7 @@ import urllib.request
 from collections.abc import Callable, Iterator
 from typing import Any
 
+from .redact import redact_secrets
 from .sse import drain_openrouter_sse
 
 OpenStream = Callable[[str, bytes, dict[str, str], float], Any]
@@ -75,4 +76,5 @@ def stream_chat_completions(
                     yield text
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{provider_name} HTTP {error.code}: {detail[:300]}") from error
+        safe = redact_secrets(detail)[:300]
+        raise RuntimeError(f"{provider_name} HTTP {error.code}: {safe}") from error

@@ -71,6 +71,7 @@
         geminiKey: false,
         nvidiaKey: false,
         llmapiKey: false,
+        keyHints: { "vercel-gateway": "ab12" },
       };
       const list = document.querySelector("#providers");
 
@@ -92,6 +93,9 @@
           const status = document.createElement("span");
           status.textContent = row.status;
 
+          const hint = document.createElement("span");
+          hint.textContent = row.keyHint;
+
           const active = document.createElement("span");
           active.textContent = row.activeLabel;
 
@@ -105,7 +109,7 @@
             await draw();
           });
           label.append(modelName, input);
-          item.append(button, status, active, label);
+          item.append(button, status, hint, active, label);
           list.append(item);
         }
       }

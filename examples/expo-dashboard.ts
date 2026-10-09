@@ -1,7 +1,8 @@
 /**
  * Reference for an Expo screen. This file is not built here.
  * The screen prints the dashboard rows. It does not add other words.
- * The key stays in expo-secure-store. This store saves the provider and the model only.
+ * On a phone, keys stay in expo-secure-store. This selection store saves the provider and the model only.
+ * Do not point the key store at localStorage or sessionStorage on the web.
  */
 import * as SecureStore from "expo-secure-store";
 import {

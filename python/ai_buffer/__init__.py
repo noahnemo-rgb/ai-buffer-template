@@ -6,6 +6,8 @@ The system prompt belongs to the app that calls this.
 """
 
 from .gemini import DEFAULT_GEMINI_MODEL, GEMINI_API_BASE, stream_gemini
+from .proxy import SERVER_PROXY_PROVIDERS, create_memory_rate_limit, handle_ai_proxy, read_owner_api_key
+from .redact import looks_like_secret, mask_key_hint, redact_secrets
 from .llmapi import DEFAULT_LLMAPI_MODEL, LLMAPI_URL, stream_llmapi
 from .nvidia import DEFAULT_NVIDIA_MODEL, NVIDIA_URL, stream_nvidia
 from .messages import DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT, build_messages, build_user_text
@@ -34,9 +36,16 @@ __all__ = [
     "SPACE_BUNNY_MODEL",
     "SPACE_BUNNY_REASONING_EFFORTS",
     "VERCEL_GATEWAY_URL",
+    "SERVER_PROXY_PROVIDERS",
     "build_messages",
     "build_user_text",
+    "create_memory_rate_limit",
     "drain_openrouter_sse",
+    "handle_ai_proxy",
+    "looks_like_secret",
+    "mask_key_hint",
+    "read_owner_api_key",
+    "redact_secrets",
     "stream_gemini",
     "stream_llmapi",
     "stream_nvidia",
