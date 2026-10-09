@@ -1,10 +1,16 @@
 import { haltError, raceAbort, startTimeout, DEFAULT_TIMEOUT_MS } from "./abort.js";
+import { streamChatCompletions, streamSsePost } from "./chat-completions.js";
 import { AiBufferError, asAiError } from "./errors.js";
+import { drainGeminiSse, geminiRequestBody, geminiStreamUrl, GEMINI_MISSING_KEY, DEFAULT_GEMINI_MODEL } from "./gemini.js";
+import { LAYA_NOT_CALLED } from "./laya.js";
 import { buildMessages, buildUserText, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT } from "./messages.js";
+import { DEFAULT_LLMAPI_MODEL, LLMAPI_MISSING_KEY, LLMAPI_URL } from "./llmapi.js";
 import { streamOpenRouter } from "./openrouter.js";
+import { providerLabel } from "./providers.js";
 import { DEFAULT_SPACE_BUNNY_EFFORT, SPACE_BUNNY_MODEL, spaceBunnyExtra, type SpaceBunnyReasoningEffort } from "./space-bunny.js";
 import { extractPuterText, isAsyncIterable, loadPuterDefault, puterChunkError } from "./puter.js";
 import type { AiClient, ChatMessage, PuterLike, StreamChatParams } from "./types.js";
+import { DEFAULT_VERCEL_GATEWAY_MODEL, VERCEL_GATEWAY_MISSING_KEY, VERCEL_GATEWAY_URL } from "./vercel-gateway.js";
 
 export interface PuterClientOptions {
   /** Model id from Puter's catalog. This is separate from the OpenRouter model. */
@@ -36,11 +42,6 @@ export interface SpaceBunnyClientOptions extends Omit<OpenRouterClientOptions, "
   /** Default is `medium`. The model accepts low, medium, high, xhigh, and max. */
   reasoningEffort?: SpaceBunnyReasoningEffort;
 }
-
-export type AiClientOptions =
-  | ({ provider: "puter" } & PuterClientOptions)
-  | ({ provider: "openrouter" } & OpenRouterClientOptions)
-  | ({ provider: "space-bunny" } & SpaceBunnyClientOptions);
 
 function requireMessage(params: StreamChatParams): void {
   if (!params.message.trim() && !params.context?.trim()) {
@@ -100,7 +101,7 @@ export function createPuterClient(options: PuterClientOptions = {}): AiClient {
         const puter = await loadPuter();
         const signedIn = Boolean(puter.auth?.isSignedIn?.());
         return {
-          label: "Puter",
+          label: providerLabel("puter"),
           description: signedIn
             ? "Signed in to Puter. AI usage is billed to that Puter account."
             : "Sign in to Puter when prompted. AI usage is billed to that Puter account.",
@@ -108,7 +109,7 @@ export function createPuterClient(options: PuterClientOptions = {}): AiClient {
         };
       } catch {
         return {
-          label: "Puter",
+          label: providerLabel("puter"),
           description:
             "Puter runs in the browser. Add the Puter script, or install @heyputer/puter.js, then sign in.",
           configured: false,
@@ -167,7 +168,7 @@ export function createOpenRouterClient(options: OpenRouterClientOptions): AiClie
       const key = (await options.getApiKey())?.trim();
       const model = await resolveModel();
       return {
-        label: "OpenRouter",
+        label: providerLabel("openrouter"),
         description: key
           ? `Using model ${model}. Usage is billed to the OpenRouter account for this key.`
           : "Add an OpenRouter API key. On a phone, keep the key on the device. On a server, set OPENROUTER_API_KEY.",
@@ -233,7 +234,7 @@ export function createSpaceBunnyClient(options: SpaceBunnyClientOptions): AiClie
     async getInfo() {
       const key = (await options.getApiKey())?.trim();
       return {
-        label: "Space Bunny Alpha",
+        label: providerLabel("space-bunny"),
         description: key
           ? `Calling ${SPACE_BUNNY_MODEL} through OpenRouter. Reasoning effort is ${effort}. The preview does not charge for tokens.`
           : "Add an OpenRouter API key. Space Bunny Alpha is requested as stealth/space-bunny-alpha.",
@@ -244,8 +245,276 @@ export function createSpaceBunnyClient(options: SpaceBunnyClientOptions): AiClie
   };
 }
 
+export interface VercelGatewayClientOptions {
+  getApiKey: () => string | null | undefined | Promise<string | null | undefined>;
+  getModel?: () => string | null | undefined | Promise<string | null | undefined>;
+  /** `provider/model` id from `GET https://ai-gateway.vercel.sh/v1/models`. */
+  model?: string;
+  defaultSystemPrompt?: string;
+  siteUrl?: string;
+  appName?: string;
+  /** Use "xhr" in React Native so tokens show up as they arrive. */
+  transport?: "fetch" | "xhr";
+  fetchImpl?: typeof fetch;
+  extra?: Record<string, unknown>;
+  /** `0` waits without a limit. The default is two minutes. */
+  timeoutMs?: number;
+}
+
+export interface GeminiClientOptions {
+  getApiKey: () => string | null | undefined | Promise<string | null | undefined>;
+  getModel?: () => string | null | undefined | Promise<string | null | undefined>;
+  /** Gemini model id, such as `gemini-3.8-flash`. */
+  model?: string;
+  defaultSystemPrompt?: string;
+  /** Use "xhr" in React Native so tokens show up as they arrive. */
+  transport?: "fetch" | "xhr";
+  fetchImpl?: typeof fetch;
+  /** `0` waits without a limit. The default is two minutes. */
+  timeoutMs?: number;
+}
+
+export interface LlmapiClientOptions {
+  getApiKey: () => string | null | undefined | Promise<string | null | undefined>;
+  getModel?: () => string | null | undefined | Promise<string | null | undefined>;
+  /** Model id accepted by the LLMAPI host. */
+  model?: string;
+  /** Defaults to `https://api.llmapi.ai/v1/chat/completions`. */
+  url?: string;
+  defaultSystemPrompt?: string;
+  siteUrl?: string;
+  appName?: string;
+  /** Use "xhr" in React Native so tokens show up as they arrive. */
+  transport?: "fetch" | "xhr";
+  fetchImpl?: typeof fetch;
+  extra?: Record<string, unknown>;
+  /** `0` waits without a limit. The default is two minutes. */
+  timeoutMs?: number;
+}
+
+export interface LayaClientOptions {
+  /** Reserved. Not read until the service is confirmed. */
+  getApiKey?: () => string | null | undefined | Promise<string | null | undefined>;
+  /** Reserved. Not called. */
+  baseUrl?: string;
+  model?: string;
+  timeoutMs?: number;
+}
+
+export type AiClientOptions =
+  | ({ provider: "puter" } & PuterClientOptions)
+  | ({ provider: "openrouter" } & OpenRouterClientOptions)
+  | ({ provider: "space-bunny" } & SpaceBunnyClientOptions)
+  | ({ provider: "vercel-gateway" } & VercelGatewayClientOptions)
+  | ({ provider: "gemini" } & GeminiClientOptions)
+  | ({ provider: "llmapi" } & LlmapiClientOptions)
+  | ({ provider: "laya" } & LayaClientOptions);
+
+export function createVercelGatewayClient(options: VercelGatewayClientOptions): AiClient {
+  async function resolveModel(): Promise<string> {
+    const fromGetter = (await options.getModel?.())?.trim();
+    return fromGetter || options.model?.trim() || DEFAULT_VERCEL_GATEWAY_MODEL;
+  }
+
+  return {
+    id: "vercel-gateway",
+    async getInfo() {
+      const key = (await options.getApiKey())?.trim();
+      const model = await resolveModel();
+      return {
+        label: providerLabel("vercel-gateway"),
+        description: key
+          ? `Using model ${model}. Send AI_GATEWAY_API_KEY, or VERCEL_OIDC_TOKEN when that key is unset.`
+          : "Set AI_GATEWAY_API_KEY, or VERCEL_OIDC_TOKEN on Vercel. Keep the key on the server or in device secure storage.",
+        configured: Boolean(key),
+      };
+    },
+    async streamChat(params) {
+      return runProviderChat(params, options.timeoutMs, async (signals) => {
+        const apiKey = (await options.getApiKey())?.trim();
+        if (!apiKey) throw new AiBufferError("missing_key", VERCEL_GATEWAY_MISSING_KEY);
+        const model = await resolveModel();
+        const messages = messagesFor(params, options.defaultSystemPrompt);
+        return raceAbort(
+          streamChatCompletions({
+            url: VERCEL_GATEWAY_URL,
+            apiKey,
+            model,
+            messages,
+            providerName: providerLabel("vercel-gateway"),
+            missingKeyMessage: VERCEL_GATEWAY_MISSING_KEY,
+            siteUrl: options.siteUrl,
+            appName: options.appName,
+            transport: options.transport,
+            signal: params.signal,
+            timeoutSignal: signals.timeout,
+            onChunk: params.onChunk,
+            fetchImpl: options.fetchImpl,
+            extra: options.extra,
+          }),
+          signals,
+        );
+      });
+    },
+  };
+}
+
+export function createGeminiClient(options: GeminiClientOptions): AiClient {
+  async function resolveModel(): Promise<string> {
+    const fromGetter = (await options.getModel?.())?.trim();
+    return fromGetter || options.model?.trim() || DEFAULT_GEMINI_MODEL;
+  }
+
+  return {
+    id: "gemini",
+    async getInfo() {
+      const key = (await options.getApiKey())?.trim();
+      const model = await resolveModel();
+      return {
+        label: providerLabel("gemini"),
+        description: key
+          ? `Using model ${model}. Requests use the Gemini API key in the x-goog-api-key header.`
+          : "Set GEMINI_API_KEY. Keep the key on the server or in device secure storage.",
+        configured: Boolean(key),
+      };
+    },
+    async streamChat(params) {
+      return runProviderChat(params, options.timeoutMs, async (signals) => {
+        const apiKey = (await options.getApiKey())?.trim();
+        if (!apiKey) throw new AiBufferError("missing_key", GEMINI_MISSING_KEY);
+        const model = await resolveModel();
+        const messages = messagesFor(params, options.defaultSystemPrompt);
+        const url = geminiStreamUrl(model);
+        return raceAbort(
+          streamSsePost({
+            url,
+            headers: {
+              "Content-Type": "application/json",
+              "x-goog-api-key": apiKey,
+            },
+            body: geminiRequestBody(messages),
+            providerName: providerLabel("gemini"),
+            transport: options.transport,
+            signal: params.signal,
+            timeoutSignal: signals.timeout,
+            fetchImpl: options.fetchImpl,
+            onChunk: params.onChunk,
+            drain: drainGeminiSse,
+          }),
+          signals,
+        );
+      });
+    },
+  };
+}
+
+export function createLlmapiClient(options: LlmapiClientOptions): AiClient {
+  const url = options.url?.trim() || LLMAPI_URL;
+  async function resolveModel(): Promise<string> {
+    const fromGetter = (await options.getModel?.())?.trim();
+    return fromGetter || options.model?.trim() || DEFAULT_LLMAPI_MODEL;
+  }
+
+  return {
+    id: "llmapi",
+    async getInfo() {
+      const key = (await options.getApiKey())?.trim();
+      const model = await resolveModel();
+      return {
+        label: providerLabel("llmapi"),
+        description: key
+          ? `Using model ${model}.`
+          : "Set LLM_API_KEY. Keep the key on the server or in device secure storage.",
+        configured: Boolean(key),
+      };
+    },
+    async streamChat(params) {
+      return runProviderChat(params, options.timeoutMs, async (signals) => {
+        const apiKey = (await options.getApiKey())?.trim();
+        if (!apiKey) throw new AiBufferError("missing_key", LLMAPI_MISSING_KEY);
+        const model = await resolveModel();
+        const messages = messagesFor(params, options.defaultSystemPrompt);
+        return raceAbort(
+          streamChatCompletions({
+            url,
+            apiKey,
+            model,
+            messages,
+            providerName: providerLabel("llmapi"),
+            missingKeyMessage: LLMAPI_MISSING_KEY,
+            siteUrl: options.siteUrl,
+            appName: options.appName,
+            transport: options.transport,
+            signal: params.signal,
+            timeoutSignal: signals.timeout,
+            onChunk: params.onChunk,
+            fetchImpl: options.fetchImpl,
+            extra: options.extra,
+          }),
+          signals,
+        );
+      });
+    },
+  };
+}
+
+export function createLayaClient(_options: LayaClientOptions = {}): AiClient {
+  return {
+    id: "laya",
+    async getInfo() {
+      return {
+        label: providerLabel("laya"),
+        description: LAYA_NOT_CALLED,
+        configured: false,
+      };
+    },
+    async streamChat(params) {
+      return runProviderChat(params, _options.timeoutMs, async () => {
+        messagesFor(params);
+        throw new AiBufferError("provider_error", LAYA_NOT_CALLED);
+      });
+    },
+  };
+}
+
+async function runProviderChat(
+  params: StreamChatParams,
+  clientTimeout: number | undefined,
+  run: (signals: { user?: AbortSignal; timeout?: AbortSignal }) => Promise<string>,
+): Promise<string> {
+  const timeoutMs = resolveTimeout(params.timeoutMs, clientTimeout);
+  const timeout = timeoutMs > 0 ? startTimeout(timeoutMs) : undefined;
+  const signals = { user: params.signal, timeout: timeout?.signal };
+  try {
+    const stopped = haltError(signals);
+    if (stopped) throw stopped;
+    return await run(signals);
+  } catch (error) {
+    throw asAiError(haltError(signals) ?? error);
+  } finally {
+    timeout?.cancel();
+  }
+}
+
 export function createAiClient(options: AiClientOptions): AiClient {
-  if (options.provider === "puter") return createPuterClient(options);
-  if (options.provider === "space-bunny") return createSpaceBunnyClient(options);
-  return createOpenRouterClient(options);
+  switch (options.provider) {
+    case "puter":
+      return createPuterClient(options);
+    case "space-bunny":
+      return createSpaceBunnyClient(options);
+    case "openrouter":
+      return createOpenRouterClient(options);
+    case "vercel-gateway":
+      return createVercelGatewayClient(options);
+    case "gemini":
+      return createGeminiClient(options);
+    case "llmapi":
+      return createLlmapiClient(options);
+    case "laya":
+      return createLayaClient(options);
+    default: {
+      const never: never = options;
+      return never;
+    }
+  }
 }

@@ -1,13 +1,38 @@
 export { DEFAULT_TIMEOUT_MS } from "./abort.js";
-export { createAiClient, createOpenRouterClient, createPuterClient, createSpaceBunnyClient } from "./client.js";
+export {
+  createAiClient,
+  createGeminiClient,
+  createLayaClient,
+  createLlmapiClient,
+  createOpenRouterClient,
+  createPuterClient,
+  createSpaceBunnyClient,
+  createVercelGatewayClient,
+} from "./client.js";
 export type {
   AiClientOptions,
+  GeminiClientOptions,
+  LayaClientOptions,
+  LlmapiClientOptions,
   OpenRouterClientOptions,
   PuterClientOptions,
   SpaceBunnyClientOptions,
+  VercelGatewayClientOptions,
 } from "./client.js";
+export {
+  createClientFromSelection,
+  createProviderSelectionStore,
+  createRouterFromSelection,
+  DASHBOARD_LABELS,
+  isProviderConfigured,
+  loadDashboard,
+} from "./dashboard.js";
+export type { DashboardRow, ProviderProbe, ProviderSelection, ProviderSelectionStore } from "./dashboard.js";
 export { AiBufferError, asAiError, codeFor, formatAiError } from "./errors.js";
 export type { AiErrorCode } from "./errors.js";
+export { DEFAULT_GEMINI_MODEL, GEMINI_API_BASE, geminiStreamUrl, readGeminiApiKey } from "./gemini.js";
+export { LAYA_CANDIDATES, LAYA_NOT_CALLED } from "./laya.js";
+export { DEFAULT_LLMAPI_MODEL, LLMAPI_URL, readLlmapiApiKey } from "./llmapi.js";
 export { createChatSession } from "./session.js";
 export type { ChatSession, ChatSessionOptions, ChatSessionSendOptions } from "./session.js";
 export {
@@ -17,7 +42,9 @@ export {
   DEFAULT_SYSTEM_PROMPT,
   formatCodeContext,
 } from "./messages.js";
-export { createCallRouter } from "./router.js";
+export { PROVIDER_CATALOG, defaultModelFor, isAiProviderId, providerLabel } from "./providers.js";
+export type { AiProviderId } from "./providers.js";
+export { createCallRouter, DEFAULT_CALL_ORDER } from "./router.js";
 export type { CallRoute, CallRouter, CallRouterOptions, RoutedChatParams } from "./router.js";
 export {
   DEFAULT_SPACE_BUNNY_EFFORT,
@@ -40,3 +67,4 @@ export type {
   SecretStore,
   StreamChatParams,
 } from "./types.js";
+export { DEFAULT_VERCEL_GATEWAY_MODEL, readGatewayApiKey, VERCEL_GATEWAY_URL } from "./vercel-gateway.js";
