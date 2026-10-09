@@ -1,0 +1,354 @@
+From 6e687e1b8117efefbcd7ef6b061b34ae208fdd6e Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Fri, 2 Oct 2026 17:58:13 +0000
+Subject: [PATCH] Ask about a Canopy map through Space Bunny Alpha, then
+ OpenRouter.
+
+Puter stays first in the browser. A key saved on that device tries stealth/space-bunny-alpha, then gpt-4o-mini. The key is not sent to the Canopy server.
+---
+ README.md                     |   2 +
+ package-lock.json             |  18 ++++++
+ package.json                  |   3 +-
+ src/components/canopy-app.tsx |   3 +
+ src/components/map-ask.tsx    | 111 ++++++++++++++++++++++++++++++++++
+ src/lib/canopy-ai.js          |  41 +++++++++++++
+ src/lib/canopy-ai.test.mjs    |  36 +++++++++++
+ src/lib/puter-stub.ts         |   1 +
+ vite.config.ts                |   8 ++-
+ 9 files changed, 221 insertions(+), 2 deletions(-)
+ create mode 100644 src/components/map-ask.tsx
+ create mode 100644 src/lib/canopy-ai.js
+ create mode 100644 src/lib/canopy-ai.test.mjs
+ create mode 100644 src/lib/puter-stub.ts
+
+diff --git a/README.md b/README.md
+index 73d62fb..3ce35a5 100644
+--- a/README.md
++++ b/README.md
+@@ -11,6 +11,8 @@ Free: 1 map, 20 nodes. Pro is listed at $9/month and is not charged in this buil
+ 
+ This repo is the Canopy app only. It does not contain the ONE house mapper.
+ 
++Ask about the open map from the page. Puter runs first. An OpenRouter key saved in that browser tries Space Bunny Alpha, then gpt-4o-mini, through [ai-buffer](https://github.com/noahnemo-rgb/ai-buffer-template) pinned at `d0c7cbc`. The key stays in the browser.
++
+ ## Run
+ 
+ ```
+diff --git a/package-lock.json b/package-lock.json
+index 2043a16..96c03f7 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -36,6 +36,7 @@
+         "@tanstack/react-table": "^8.21.0",
+         "@tanstack/router-plugin": "^1.168.0",
+         "@vitejs/plugin-react": "^5.2.0",
++        "ai-buffer": "github:noahnemo-rgb/ai-buffer-template#d0c7cbc40df991805efaf64223a00fc3fbb72e15",
+         "better-auth": "~1.6.30",
+         "class-variance-authority": "^0.7.1",
+         "clsx": "^2.1.1",
+@@ -3952,6 +3953,23 @@
+         "acorn": "^6.0.0 || ^7.0.0 || ^8.0.0"
+       }
+     },
++    "node_modules/ai-buffer": {
++      "version": "0.3.0",
++      "resolved": "git+ssh://git@github.com/noahnemo-rgb/ai-buffer-template.git#d0c7cbc40df991805efaf64223a00fc3fbb72e15",
++      "integrity": "sha512-tp2RSuMQxCyysRz7Kg6qICF354BRw6P+8+QT/tyTlixIXRlb8cMC0cXse73oR15/QVGteYwGlSktcie/5zJ7zA==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "@heyputer/puter.js": "^2.0.0"
++      },
++      "peerDependenciesMeta": {
++        "@heyputer/puter.js": {
++          "optional": true
++        }
++      }
++    },
+     "node_modules/ajv": {
+       "version": "8.20.0",
+       "resolved": "https://registry.npmjs.org/ajv/-/ajv-8.20.0.tgz",
+diff --git a/package.json b/package.json
+index 416707d..79c8511 100644
+--- a/package.json
++++ b/package.json
+@@ -16,7 +16,7 @@
+     "preview:stop": "node scripts/preview.mjs stop",
+     "typecheck": "tsc --noEmit",
+     "check:auth": "node scripts/check-auth-invariant.mjs",
+-    "test": "node --test 'scripts/**/*.test.mjs' && node --experimental-strip-types --test src/lib/app-data/app-data.test.ts src/lib/app-data/readiness-schedule.test.ts src/lib/auth/gate-identity.test.ts src/lib/auth/sign-in-gate.test.ts",
++    "test": "node --test 'scripts/**/*.test.mjs' src/lib/canopy-ai.test.mjs && node --experimental-strip-types --test src/lib/app-data/app-data.test.ts src/lib/app-data/readiness-schedule.test.ts src/lib/auth/gate-identity.test.ts src/lib/auth/sign-in-gate.test.ts",
+     "lint": "eslint .",
+     "format": "prettier --write ."
+   },
+@@ -51,6 +51,7 @@
+     "@tanstack/react-table": "^8.21.0",
+     "@tanstack/router-plugin": "^1.168.0",
+     "@vitejs/plugin-react": "^5.2.0",
++    "ai-buffer": "github:noahnemo-rgb/ai-buffer-template#d0c7cbc40df991805efaf64223a00fc3fbb72e15",
+     "better-auth": "~1.6.30",
+     "class-variance-authority": "^0.7.1",
+     "clsx": "^2.1.1",
+diff --git a/src/components/canopy-app.tsx b/src/components/canopy-app.tsx
+index 77e3455..5f98685 100644
+--- a/src/components/canopy-app.tsx
++++ b/src/components/canopy-app.tsx
+@@ -1,5 +1,6 @@
+ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+ import { ForceMap } from "@/components/force-map";
++import { MapAsk } from "@/components/map-ask";
+ import { GROK_PROVIDERS, signIn } from "@/lib/auth/client";
+ import { enterFreeMap } from "@/lib/auth/guest-fns";
+ import { UserButton } from "@/lib/auth/gates";
+@@ -272,6 +273,8 @@ export function CanopyApp({ guest = false }: { guest?: boolean }) {
+ 
+           <ForceMap nodes={nodes} selectedId={selectedId} onSelect={setSelectedId} />
+ 
++          <MapAsk nodes={nodes} />
++
+           {selected && (
+             <NodeCard
+               node={selected}
+diff --git a/src/components/map-ask.tsx b/src/components/map-ask.tsx
+new file mode 100644
+index 0000000..7f2e230
+--- /dev/null
++++ b/src/components/map-ask.tsx
+@@ -0,0 +1,111 @@
++import { useEffect, useState, type FormEvent } from "react";
++import { CANOPY_PROMPT, createCanopyRouter, mapNotes } from "@/lib/canopy-ai.js";
++import type { CanopyNode } from "@/lib/canopy";
++
++const KEY_NAME = "canopy_openrouter_key";
++
++function loadPuter() {
++  return new Promise((resolve, reject) => {
++    if (typeof window === "undefined") {
++      reject(new Error("Puter runs in the browser."));
++      return;
++    }
++    const existing = (window as Window & { puter?: { ai?: { chat?: unknown } } }).puter;
++    if (existing?.ai?.chat) {
++      resolve(existing);
++      return;
++    }
++    const prior = document.querySelector('script[data-canopy="puter"]');
++    if (prior) {
++      prior.addEventListener("load", () => resolve((window as Window & { puter?: unknown }).puter));
++      prior.addEventListener("error", () => reject(new Error("Puter script failed")));
++      return;
++    }
++    const script = document.createElement("script");
++    script.src = "https://js.puter.com/v2/";
++    script.async = true;
++    script.dataset.canopy = "puter";
++    script.onload = () => resolve((window as Window & { puter?: unknown }).puter);
++    script.onerror = () => reject(new Error("Puter script failed"));
++    document.head.appendChild(script);
++  });
++}
++
++export function MapAsk({ nodes }: { nodes: CanopyNode[] }) {
++  const [key, setKey] = useState("");
++  const [question, setQuestion] = useState("");
++  const [answer, setAnswer] = useState("");
++  const [error, setError] = useState("");
++  const [busy, setBusy] = useState(false);
++
++  useEffect(() => {
++    setKey(localStorage.getItem(KEY_NAME) || "");
++  }, []);
++
++  function saveKey(value: string) {
++    setKey(value);
++    const trimmed = value.trim();
++    if (trimmed) localStorage.setItem(KEY_NAME, trimmed);
++    else localStorage.removeItem(KEY_NAME);
++  }
++
++  async function onAsk(event: FormEvent) {
++    event.preventDefault();
++    const message = question.trim();
++    if (!message || busy) return;
++    setBusy(true);
++    setError("");
++    setAnswer("");
++    try {
++      const router = createCanopyRouter({
++        apiKey: key,
++        loadPuter,
++        siteUrl: window.location.origin,
++      });
++      const text = await router.streamChat({
++        message,
++        systemPrompt: CANOPY_PROMPT,
++        context: mapNotes(nodes),
++      });
++      setAnswer(text);
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "The map question did not go through.");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <form onSubmit={onAsk} className="rounded-xl border border-line bg-panel p-4">
++      <h2 className="font-display text-xl">Ask about this map</h2>
++      <p className="mt-1 text-xs leading-relaxed text-mute">
++        Puter runs first in this browser. An OpenRouter key saved here tries Space Bunny Alpha, then gpt-4o-mini. The key stays in this browser.
++      </p>
++      <label className="mt-3 block text-xs text-mute">
++        OpenRouter key, optional
++        <input
++          type="password"
++          className="mt-1 w-full rounded-md border border-line bg-ink px-3 py-2.5 text-sm text-paper"
++          value={key}
++          onChange={(event) => saveKey(event.target.value)}
++          placeholder="sk-or-..."
++          autoComplete="off"
++        />
++      </label>
++      <label className="mt-3 block text-xs text-mute">
++        Question
++        <textarea
++          className="mt-1 min-h-20 w-full rounded-md border border-line bg-ink px-3 py-2.5 text-sm text-paper"
++          value={question}
++          onChange={(event) => setQuestion(event.target.value)}
++          placeholder="Which gap is the next one to look at?"
++        />
++      </label>
++      <button type="submit" disabled={busy} className="mt-3 rounded-md bg-leaf px-3 py-2 text-sm font-medium text-leaf-ink disabled:opacity-50">
++        {busy ? "Asking…" : "Ask"}
++      </button>
++      {error && <p role="alert" className="mt-3 text-sm text-amber">{error}</p>}
++      {answer && <p className="mt-3 whitespace-pre-wrap text-sm leading-relaxed">{answer}</p>}
++    </form>
++  );
++}
+diff --git a/src/lib/canopy-ai.js b/src/lib/canopy-ai.js
+new file mode 100644
+index 0000000..5a6deb1
+--- /dev/null
++++ b/src/lib/canopy-ai.js
+@@ -0,0 +1,41 @@
++import { createCallRouter } from "ai-buffer";
++
++export const CANOPY_PROMPT =
++  "You help a person read their Canopy map. The notes list work they are building and gaps they are tracking. Be concrete and short. Do not write the missing code.";
++
++export function mapNotes(nodes) {
++  return (nodes || [])
++    .slice(0, 40)
++    .map((node) => {
++      const repo = node.repo ? ` (${node.repo})` : "";
++      const gaps = Array.isArray(node.gaps) && node.gaps.length ? ` gaps: ${node.gaps.join("; ")}` : "";
++      return `${node.level || "node"}: ${node.name || "untitled"}${repo}${gaps}`;
++    })
++    .join("\n");
++}
++
++/**
++ * Puter first. A saved OpenRouter key tries Space Bunny Alpha, then gpt-4o-mini.
++ */
++export function createCanopyRouter({ apiKey, fetchImpl, loadPuter, timeoutMs, siteUrl }) {
++  const key = typeof apiKey === "string" ? apiKey.trim() : "";
++  const shared = key
++    ? {
++        getApiKey: () => key,
++        appName: "Canopy",
++        siteUrl: siteUrl || "https://canopy.local",
++        fetchImpl,
++        timeoutMs,
++      }
++    : null;
++  return createCallRouter({
++    puter: { model: "openai/gpt-4o-mini", loadPuter, timeoutMs },
++    ...(shared
++      ? {
++          spaceBunny: shared,
++          openrouter: { ...shared, model: "openai/gpt-4o-mini" },
++        }
++      : {}),
++    order: ["puter", "space-bunny", "openrouter"],
++  });
++}
+diff --git a/src/lib/canopy-ai.test.mjs b/src/lib/canopy-ai.test.mjs
+new file mode 100644
+index 0000000..85dacf9
+--- /dev/null
++++ b/src/lib/canopy-ai.test.mjs
+@@ -0,0 +1,36 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { createCanopyRouter, mapNotes } from "./canopy-ai.js";
++
++function sse(text) {
++  const body = `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\ndata: [DONE]\n`;
++  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
++}
++
++test("map notes keep names, repos, and gaps", () => {
++  const notes = mapNotes([
++    { level: "repo", name: "Canopy", repo: "noahnemo-rgb/canopy-map", gaps: ["Sign-in later"] },
++  ]);
++  assert.match(notes, /repo: Canopy \(noahnemo-rgb\/canopy-map\) gaps: Sign-in later/);
++});
++
++test("a saved key tries Space Bunny Alpha after Puter, then gpt-4o-mini", async () => {
++  const models = [];
++  const router = createCanopyRouter({
++    apiKey: "sk-test",
++    timeoutMs: 1000,
++    siteUrl: "https://canopy.local",
++    loadPuter: async () => {
++      throw new Error("puter unavailable");
++    },
++    fetchImpl: async (_input, init) => {
++      const payload = JSON.parse(String(init?.body));
++      models.push(payload.model);
++      if (models.length === 1) return new Response("slow down", { status: 429 });
++      return sse("next");
++    },
++  });
++
++  assert.equal(await router.streamChat({ message: "What gap should I look at?" }), "next");
++  assert.deepEqual(models, ["stealth/space-bunny-alpha", "openai/gpt-4o-mini"]);
++});
+diff --git a/src/lib/puter-stub.ts b/src/lib/puter-stub.ts
+new file mode 100644
+index 0000000..1e36fdb
+--- /dev/null
++++ b/src/lib/puter-stub.ts
+@@ -0,0 +1 @@
++export const puter = undefined;
+diff --git a/vite.config.ts b/vite.config.ts
+index f0aa67d..d404393 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -1,5 +1,6 @@
+ import { readdirSync } from "node:fs";
+ import { join } from "node:path";
++import { fileURLToPath } from "node:url";
+ import type { Plugin } from "vite";
+ import { defineConfig } from "vite";
+ import { tanstackStart } from "@tanstack/react-start/plugin/vite";
+@@ -156,7 +157,12 @@ export default defineConfig(({ command, isPreview }) => ({
+     port: 8081,
+     strictPort: true,
+   },
+-  resolve: { tsconfigPaths: true },
++  resolve: {
++    tsconfigPaths: true,
++    alias: {
++      "@heyputer/puter.js": fileURLToPath(new URL("./src/lib/puter-stub.ts", import.meta.url)),
++    },
++  },
+   plugins: [
+     pgliteBootstrapPlugin(),
+     // Before tanstackStart so /auth/popup never falls through to the SPA.
+-- 
+2.43.0
+
