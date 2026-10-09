@@ -1,7 +1,7 @@
 {
   "name": "ai-buffer",
   "version": "0.3.0",
-  "description": "Shared chat adapter for Puter, OpenRouter, Space Bunny Alpha, Vercel Gateway, Gemini API, and LLMAPI. Laya is listed and not called.",
+  "description": "Shared chat adapter for Puter, OpenRouter, Space Bunny Alpha, Vercel Gateway, Gemini API, NVIDIA NIM, and LLMAPI.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { createAiClient } from "../src/client.ts";
 import { AiBufferError } from "../src/errors.ts";
 import { DEFAULT_GEMINI_MODEL } from "../src/gemini.ts";
-import { LAYA_NOT_CALLED } from "../src/laya.ts";
+import { DEFAULT_NVIDIA_MODEL, NVIDIA_URL } from "../src/nvidia.ts";
 import { DEFAULT_LLMAPI_MODEL, LLMAPI_URL } from "../src/llmapi.ts";
 import { createCallRouter } from "../src/router.ts";
 import { readGatewayApiKey, VERCEL_GATEWAY_URL } from "../src/vercel-gateway.ts";
@@ -331,30 +331,55 @@ describe("LLMAPI", () => {
   });
 });
 
-describe("Laya", () => {
-  it("does not call the network", async () => {
-    let called = false;
+describe("NVIDIA NIM", () => {
+  it("calls the Nemotron chat completions host", async () => {
+    let payload: { model?: string; stream?: boolean } = {};
     const client = createAiClient({
-      provider: "laya",
-      getApiKey: () => "laya-key",
-      baseUrl: "https://api.laya.studio",
+      provider: "nvidia",
+      getApiKey: () => "nv-key",
+      fetchImpl: async (input, init) => {
+        assert.equal(String(input), NVIDIA_URL);
+        const headers = init?.headers as Record<string, string>;
+        assert.equal(headers.Authorization, "Bearer nv-key");
+        payload = JSON.parse(String(init?.body));
+        return sseResponse(`${event("nemo")}\ndata: [DONE]\n`);
+      },
     });
-    const info = await client.getInfo();
-    assert.equal(info.label, "Laya");
-    assert.equal(info.configured, false);
-    assert.equal(info.description, LAYA_NOT_CALLED);
-    await assert.rejects(
-      () => client.streamChat({ message: "Hi" }),
-      (error: unknown) => error instanceof AiBufferError && error.code === "provider_error" && error.message === LAYA_NOT_CALLED,
-    );
-    assert.equal(called, false);
+    assert.equal((await client.getInfo()).label, "NVIDIA NIM");
+    assert.equal(await client.streamChat({ message: "Hi" }), "nemo");
+    assert.equal(payload.model, DEFAULT_NVIDIA_MODEL);
+    assert.equal(payload.stream, true);
   });
 
-  it("keeps an empty message on this route", async () => {
-    const client = createAiClient({ provider: "laya" });
+  it("explains a missing key and maps 429 and 402", async () => {
+    const missing = createAiClient({
+      provider: "nvidia",
+      getApiKey: () => "",
+      fetchImpl: async () => {
+        throw new Error("fetch should not run");
+      },
+    });
     await assert.rejects(
-      () => client.streamChat({ message: "  " }),
-      (error: unknown) => error instanceof AiBufferError && error.code === "empty_message",
+      () => missing.streamChat({ message: "Hi" }),
+      (error: unknown) => error instanceof AiBufferError && error.code === "missing_key" && /NVIDIA_API_KEY/.test(error.message),
+    );
+    const limited = createAiClient({
+      provider: "nvidia",
+      getApiKey: () => "nv",
+      fetchImpl: async () => sseResponse("slow", 429),
+    });
+    await assert.rejects(
+      () => limited.streamChat({ message: "Hi" }),
+      (error: unknown) => error instanceof AiBufferError && error.code === "rate_limited",
+    );
+    const unpaid = createAiClient({
+      provider: "nvidia",
+      getApiKey: () => "nv",
+      fetchImpl: async () => sseResponse("credits", 402),
+    });
+    await assert.rejects(
+      () => unpaid.streamChat({ message: "Hi" }),
+      (error: unknown) => error instanceof AiBufferError && error.code === "payment_required",
     );
   });
 });

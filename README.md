@@ -1,6 +1,6 @@
 # ai-buffer
 
-A small shared adapter for **Puter**, **OpenRouter**, **Space Bunny Alpha**, **Vercel Gateway**, **Gemini API**, and **LLMAPI**. **Laya** is listed and not called until the service is confirmed. Each app keeps its own instructions. This package only sends the chat and streams the reply back.
+A small shared adapter for **Puter**, **OpenRouter**, **Space Bunny Alpha**, **Vercel Gateway**, **Gemini API**, **NVIDIA NIM**, and **LLMAPI**. Each app keeps its own instructions. This package only sends the chat and streams the reply back.
 
 Your phone app, your website, and your Python API can all call the same kind of function. The provider changes. The call does not.
 
@@ -13,7 +13,7 @@ Your phone app, your website, and your Python API can all call the same kind of 
 | A server you run, or a phone | The AI Gateway account for `AI_GATEWAY_API_KEY`, or the Vercel project for `VERCEL_OIDC_TOKEN` | `provider: "vercel-gateway"` |
 | A server you run, or a phone | The Google project for `GEMINI_API_KEY` | `provider: "gemini"` |
 | A server you run, or a phone | The LLMAPI account for `LLM_API_KEY` | `provider: "llmapi"` |
-| Listed in the dashboard | Not called | `provider: "laya"` |
+| A server you run, or a phone | The NVIDIA account for `NVIDIA_API_KEY` | `provider: "nvidia"` |
 
 Puter sign-in happens in the browser. A phone and a Python server use OpenRouter instead. The adapter hides that split.
 
@@ -80,7 +80,7 @@ A full screen sketch is in `examples/expo-app.ts`.
 
 Put an OpenRouter key in the phone's secure store, or in the server environment as `OPENROUTER_API_KEY`. A website should use Puter, or it should call your server. A key placed in the website's JavaScript can be copied by anyone who opens the page.
 
-`AI_GATEWAY_API_KEY`, `VERCEL_OIDC_TOKEN`, `GEMINI_API_KEY`, and `LLM_API_KEY` follow the same rule. Keep them in the server environment or in device secure storage.
+`AI_GATEWAY_API_KEY`, `VERCEL_OIDC_TOKEN`, `GEMINI_API_KEY`, `NVIDIA_API_KEY`, and `LLM_API_KEY` follow the same rule. Keep them in the server environment or in device secure storage.
 
 ## Errors the screen can branch on
 
@@ -253,16 +253,30 @@ for chunk in stream_llmapi(api_key=os.environ["LLM_API_KEY"], messages=messages)
     print(chunk, end="", flush=True)
 ```
 
-## Laya
+## NVIDIA NIM
 
-Laya is not called. Two hosted APIs use the name, and both are decision endpoints (`POST /v1/systemone`) rather than chat completions:
+NVIDIA NIM serves Nemotron and other catalog models through one OpenAI-compatible chat completions endpoint. The URL is `https://integrate.api.nvidia.com/v1/chat/completions`. Send `Authorization: Bearer` with `NVIDIA_API_KEY`. Model ids look like `nvidia/nemotron-3-nano-30b-a3b`. That id is the default here. It was listed under NVIDIA on the LLM APIs page on 2026-10-09. Streaming is Server-Sent Events: `data:` JSON with `choices[0].delta.content`, then `data: [DONE]`.
 
-| Service | Base URL | Docs |
-| --- | --- | --- |
-| Laya Studio | `https://api.laya.studio` | [API reference](https://laya.studio/docs/api) |
-| Laya AI | `https://api.laya-ai.com` | [HTTP guide](https://laya-ai.com/laya-api) |
+Docs: [LLM APIs](https://docs.api.nvidia.com/nim/reference/llm-apis), [catalog auth](https://build.nvidia.com/llms.txt), [Nemotron 3 Nano](https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3-nano-30b-a3b-infer).
 
-Those endpoints return typed answers and probabilities. They do not stream a chat reply. `createLayaClient` and `stream_laya` are the extension point. They do not send HTTP. The dashboard still lists Laya, and it stays `not configured`.
+```ts
+import { createAiClient, readNvidiaApiKey } from "ai-buffer";
+
+const ai = createAiClient({
+  provider: "nvidia",
+  getApiKey: () => readNvidiaApiKey(process.env),
+  model: process.env.NVIDIA_MODEL,
+});
+```
+
+On a phone, pass `transport: "xhr"`. Python:
+
+```python
+from ai_buffer import stream_nvidia
+
+for chunk in stream_nvidia(api_key=os.environ["NVIDIA_API_KEY"], messages=messages):
+    print(chunk, end="", flush=True)
+```
 
 ## Python / FastAPI
 
@@ -288,7 +302,7 @@ for chunk in stream_openrouter(
 
 `examples/fastapi_route.py` shows the same helper behind a streaming route.
 
-`stream_vercel_gateway`, `stream_gemini`, and `stream_llmapi` are the same kind of helper for the other hosts. `stream_laya` raises `Laya is not called. Confirm which Laya service to use.`
+`stream_vercel_gateway`, `stream_gemini`, `stream_nvidia`, and `stream_llmapi` are the same kind of helper for the other hosts.
 
 ## Provider dashboard
 
@@ -311,6 +325,7 @@ const rows = await loadDashboard(selection, {
   openrouterKey: Boolean(process.env.OPENROUTER_API_KEY),
   gatewayKey: Boolean(readGatewayApiKey(process.env)),
   geminiKey: Boolean(process.env.GEMINI_API_KEY),
+  nvidiaKey: Boolean(process.env.NVIDIA_API_KEY),
   llmapiKey: Boolean(process.env.LLM_API_KEY),
 });
 const chosen = await selection.getSelection();
@@ -341,7 +356,7 @@ This package does not add a chat window by itself. The app still has to:
 3. Show `onChunk` on the screen.
 4. Branch on `error.code` for sign-in, a missing key, or a wait message.
 
-`getInfo()` tells the screen whether Puter is signed in or an OpenRouter key is saved. The same call reports a Vercel Gateway key, a Gemini API key, or an LLMAPI key. Laya reports that it is not configured.
+`getInfo()` tells the screen whether Puter is signed in or an OpenRouter key is saved. The same call reports a Vercel Gateway key, a Gemini API key, an NVIDIA API key, or an LLMAPI key.
 
 ## Model names
 

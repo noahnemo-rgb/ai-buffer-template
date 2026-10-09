@@ -1,6 +1,7 @@
 import { DEFAULT_MODEL } from "./messages.js";
 import { DEFAULT_GEMINI_MODEL } from "./gemini.js";
 import { DEFAULT_LLMAPI_MODEL } from "./llmapi.js";
+import { DEFAULT_NVIDIA_MODEL } from "./nvidia.js";
 import { SPACE_BUNNY_MODEL } from "./space-bunny.js";
 
 /** Provider ids used by `createAiClient` and the options dashboard. */
@@ -10,7 +11,7 @@ export const PROVIDER_CATALOG = [
   { id: "space-bunny", label: "Space Bunny Alpha" },
   { id: "vercel-gateway", label: "Vercel Gateway" },
   { id: "gemini", label: "Gemini API" },
-  { id: "laya", label: "Laya" },
+  { id: "nvidia", label: "NVIDIA NIM" },
   { id: "llmapi", label: "LLMAPI" },
 ] as const;
 
@@ -39,8 +40,8 @@ export function defaultModelFor(id: AiProviderId): string {
       return DEFAULT_GEMINI_MODEL;
     case "llmapi":
       return DEFAULT_LLMAPI_MODEL;
-    case "laya":
-      return "";
+    case "nvidia":
+      return DEFAULT_NVIDIA_MODEL;
     default: {
       const never: never = id;
       return never;

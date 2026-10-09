@@ -21,6 +21,8 @@ export interface ProviderProbe {
   gatewayKey?: boolean;
   /** `GEMINI_API_KEY` is available. */
   geminiKey?: boolean;
+  /** `NVIDIA_API_KEY` is available. */
+  nvidiaKey?: boolean;
   /** `LLM_API_KEY` is available. */
   llmapiKey?: boolean;
 }
@@ -88,7 +90,6 @@ export function createProviderSelectionStore(store: SecretStore): ProviderSelect
   };
 }
 
-/** Laya stays unconfigured until a service is wired in `src/laya.ts`. */
 export function isProviderConfigured(id: AiProviderId, probe: ProviderProbe): boolean {
   switch (id) {
     case "puter":
@@ -100,10 +101,10 @@ export function isProviderConfigured(id: AiProviderId, probe: ProviderProbe): bo
       return Boolean(probe.gatewayKey);
     case "gemini":
       return Boolean(probe.geminiKey);
+    case "nvidia":
+      return Boolean(probe.nvidiaKey);
     case "llmapi":
       return Boolean(probe.llmapiKey);
-    case "laya":
-      return false;
     default: {
       const never: never = id;
       return never;
@@ -158,11 +159,12 @@ function optionsForSelection(provider: AiProviderId, model: string, options: Cal
     case "gemini":
       if (!options.gemini) missingRoute(provider);
       return { provider: "gemini", ...options.gemini, ...(model ? { model } : {}) };
+    case "nvidia":
+      if (!options.nvidia) missingRoute(provider);
+      return { provider: "nvidia", ...options.nvidia, ...(model ? { model } : {}) };
     case "llmapi":
       if (!options.llmapi) missingRoute(provider);
       return { provider: "llmapi", ...options.llmapi, ...(model ? { model } : {}) };
-    case "laya":
-      return { provider: "laya", ...options.laya };
     default: {
       const never: never = provider;
       return never;
@@ -171,7 +173,7 @@ function optionsForSelection(provider: AiProviderId, model: string, options: Cal
 }
 
 function applyModel(provider: AiProviderId, model: string, options: CallRouterOptions): CallRouterOptions {
-  if (!model || provider === "space-bunny" || provider === "laya") return options;
+  if (!model || provider === "space-bunny") return options;
   switch (provider) {
     case "puter":
       return { ...options, puter: { ...options.puter, model } };
@@ -181,6 +183,8 @@ function applyModel(provider: AiProviderId, model: string, options: CallRouterOp
       return options.vercelGateway ? { ...options, vercelGateway: { ...options.vercelGateway, model } } : options;
     case "gemini":
       return options.gemini ? { ...options, gemini: { ...options.gemini, model } } : options;
+    case "nvidia":
+      return options.nvidia ? { ...options, nvidia: { ...options.nvidia, model } } : options;
     case "llmapi":
       return options.llmapi ? { ...options, llmapi: { ...options.llmapi, model } } : options;
     default:

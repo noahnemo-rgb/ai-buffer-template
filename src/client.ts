@@ -2,7 +2,7 @@ import { haltError, raceAbort, startTimeout, DEFAULT_TIMEOUT_MS } from "./abort.
 import { streamChatCompletions, streamSsePost } from "./chat-completions.js";
 import { AiBufferError, asAiError } from "./errors.js";
 import { drainGeminiSse, geminiRequestBody, geminiStreamUrl, GEMINI_MISSING_KEY, DEFAULT_GEMINI_MODEL } from "./gemini.js";
-import { LAYA_NOT_CALLED } from "./laya.js";
+import { DEFAULT_NVIDIA_MODEL, NVIDIA_MISSING_KEY, NVIDIA_URL } from "./nvidia.js";
 import { buildMessages, buildUserText, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT } from "./messages.js";
 import { DEFAULT_LLMAPI_MODEL, LLMAPI_MISSING_KEY, LLMAPI_URL } from "./llmapi.js";
 import { streamOpenRouter } from "./openrouter.js";
@@ -292,12 +292,19 @@ export interface LlmapiClientOptions {
   timeoutMs?: number;
 }
 
-export interface LayaClientOptions {
-  /** Reserved. Not read until the service is confirmed. */
-  getApiKey?: () => string | null | undefined | Promise<string | null | undefined>;
-  /** Reserved. Not called. */
-  baseUrl?: string;
+export interface NvidiaClientOptions {
+  getApiKey: () => string | null | undefined | Promise<string | null | undefined>;
+  getModel?: () => string | null | undefined | Promise<string | null | undefined>;
+  /** Model id from the NVIDIA NIM catalog, such as `nvidia/nemotron-3-nano-30b-a3b`. */
   model?: string;
+  defaultSystemPrompt?: string;
+  siteUrl?: string;
+  appName?: string;
+  /** Use "xhr" in React Native so tokens show up as they arrive. */
+  transport?: "fetch" | "xhr";
+  fetchImpl?: typeof fetch;
+  extra?: Record<string, unknown>;
+  /** `0` waits without a limit. The default is two minutes. */
   timeoutMs?: number;
 }
 
@@ -307,8 +314,8 @@ export type AiClientOptions =
   | ({ provider: "space-bunny" } & SpaceBunnyClientOptions)
   | ({ provider: "vercel-gateway" } & VercelGatewayClientOptions)
   | ({ provider: "gemini" } & GeminiClientOptions)
-  | ({ provider: "llmapi" } & LlmapiClientOptions)
-  | ({ provider: "laya" } & LayaClientOptions);
+  | ({ provider: "nvidia" } & NvidiaClientOptions)
+  | ({ provider: "llmapi" } & LlmapiClientOptions);
 
 export function createVercelGatewayClient(options: VercelGatewayClientOptions): AiClient {
   async function resolveModel(): Promise<string> {
@@ -458,20 +465,50 @@ export function createLlmapiClient(options: LlmapiClientOptions): AiClient {
   };
 }
 
-export function createLayaClient(_options: LayaClientOptions = {}): AiClient {
+export function createNvidiaClient(options: NvidiaClientOptions): AiClient {
+  async function resolveModel(): Promise<string> {
+    const fromGetter = (await options.getModel?.())?.trim();
+    return fromGetter || options.model?.trim() || DEFAULT_NVIDIA_MODEL;
+  }
+
   return {
-    id: "laya",
+    id: "nvidia",
     async getInfo() {
+      const key = (await options.getApiKey())?.trim();
+      const model = await resolveModel();
       return {
-        label: providerLabel("laya"),
-        description: LAYA_NOT_CALLED,
-        configured: false,
+        label: providerLabel("nvidia"),
+        description: key
+          ? `Using model ${model}.`
+          : "Set NVIDIA_API_KEY. Keep the key on the server or in device secure storage.",
+        configured: Boolean(key),
       };
     },
     async streamChat(params) {
-      return runProviderChat(params, _options.timeoutMs, async () => {
-        messagesFor(params);
-        throw new AiBufferError("provider_error", LAYA_NOT_CALLED);
+      return runProviderChat(params, options.timeoutMs, async (signals) => {
+        const apiKey = (await options.getApiKey())?.trim();
+        if (!apiKey) throw new AiBufferError("missing_key", NVIDIA_MISSING_KEY);
+        const model = await resolveModel();
+        const messages = messagesFor(params, options.defaultSystemPrompt);
+        return raceAbort(
+          streamChatCompletions({
+            url: NVIDIA_URL,
+            apiKey,
+            model,
+            messages,
+            providerName: providerLabel("nvidia"),
+            missingKeyMessage: NVIDIA_MISSING_KEY,
+            siteUrl: options.siteUrl,
+            appName: options.appName,
+            transport: options.transport,
+            signal: params.signal,
+            timeoutSignal: signals.timeout,
+            onChunk: params.onChunk,
+            fetchImpl: options.fetchImpl,
+            extra: options.extra,
+          }),
+          signals,
+        );
       });
     },
   };
@@ -510,8 +547,8 @@ export function createAiClient(options: AiClientOptions): AiClient {
       return createGeminiClient(options);
     case "llmapi":
       return createLlmapiClient(options);
-    case "laya":
-      return createLayaClient(options);
+    case "nvidia":
+      return createNvidiaClient(options);
     default: {
       const never: never = options;
       return never;

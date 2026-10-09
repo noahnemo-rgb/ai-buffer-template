@@ -9,14 +9,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ai_buffer import (
     DEFAULT_LLMAPI_MODEL,
-    LAYA_NOT_CALLED,
+    DEFAULT_NVIDIA_MODEL,
     stream_gemini,
-    stream_laya,
     stream_llmapi,
+    stream_nvidia,
     stream_vercel_gateway,
 )
 from ai_buffer.gemini import GEMINI_API_BASE
 from ai_buffer.llmapi import LLMAPI_URL
+from ai_buffer.nvidia import NVIDIA_URL
 from ai_buffer.vercel_gateway import VERCEL_GATEWAY_URL, read_gateway_api_key
 
 
@@ -146,9 +147,28 @@ class ProviderStreamTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "LLM_API_KEY"):
             list(stream_llmapi(api_key="", messages=[]))
 
-    def test_laya_is_not_called(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, LAYA_NOT_CALLED):
-            stream_laya(api_key="unused", messages=[])
+    def test_nvidia_sends_the_nemotron_model(self) -> None:
+        seen: dict[str, object] = {}
+
+        def opener(url: str, payload: bytes, headers: dict[str, str], timeout_sec: float) -> _FakeBody:
+            seen["url"] = url
+            seen["payload"] = json.loads(payload.decode("utf-8"))
+            seen["headers"] = headers
+            return _FakeBody([chat_event("nemo"), b"data: [DONE]\n"])
+
+        chunks = list(stream_nvidia(api_key="nv-key", messages=[{"role": "user", "content": "Hi"}], open_stream=opener))
+        self.assertEqual(chunks, ["nemo"])
+        self.assertEqual(seen["url"], NVIDIA_URL)
+        payload = seen["payload"]
+        assert isinstance(payload, dict)
+        self.assertEqual(payload["model"], DEFAULT_NVIDIA_MODEL)
+        headers = seen["headers"]
+        assert isinstance(headers, dict)
+        self.assertEqual(headers["Authorization"], "Bearer nv-key")
+
+    def test_nvidia_missing_key(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "NVIDIA_API_KEY"):
+            list(stream_nvidia(api_key="", messages=[]))
 
 
 if __name__ == "__main__":

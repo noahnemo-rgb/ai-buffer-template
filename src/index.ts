@@ -2,8 +2,8 @@ export { DEFAULT_TIMEOUT_MS } from "./abort.js";
 export {
   createAiClient,
   createGeminiClient,
-  createLayaClient,
   createLlmapiClient,
+  createNvidiaClient,
   createOpenRouterClient,
   createPuterClient,
   createSpaceBunnyClient,
@@ -12,8 +12,8 @@ export {
 export type {
   AiClientOptions,
   GeminiClientOptions,
-  LayaClientOptions,
   LlmapiClientOptions,
+  NvidiaClientOptions,
   OpenRouterClientOptions,
   PuterClientOptions,
   SpaceBunnyClientOptions,
@@ -31,7 +31,7 @@ export type { DashboardRow, ProviderProbe, ProviderSelection, ProviderSelectionS
 export { AiBufferError, asAiError, codeFor, formatAiError } from "./errors.js";
 export type { AiErrorCode } from "./errors.js";
 export { DEFAULT_GEMINI_MODEL, GEMINI_API_BASE, geminiStreamUrl, readGeminiApiKey } from "./gemini.js";
-export { LAYA_CANDIDATES, LAYA_NOT_CALLED } from "./laya.js";
+export { DEFAULT_NVIDIA_MODEL, NVIDIA_URL, readNvidiaApiKey } from "./nvidia.js";
 export { DEFAULT_LLMAPI_MODEL, LLMAPI_URL, readLlmapiApiKey } from "./llmapi.js";
 export { createChatSession } from "./session.js";
 export type { ChatSession, ChatSessionOptions, ChatSessionSendOptions } from "./session.js";

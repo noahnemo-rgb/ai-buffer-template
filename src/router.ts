@@ -1,7 +1,7 @@
 import {
   createGeminiClient,
-  createLayaClient,
   createLlmapiClient,
+  createNvidiaClient,
   createOpenRouterClient,
   createPuterClient,
   createSpaceBunnyClient,
@@ -9,8 +9,8 @@ import {
 } from "./client.js";
 import type {
   GeminiClientOptions,
-  LayaClientOptions,
   LlmapiClientOptions,
+  NvidiaClientOptions,
   OpenRouterClientOptions,
   PuterClientOptions,
   SpaceBunnyClientOptions,
@@ -35,8 +35,8 @@ export const DEFAULT_CALL_ORDER: CallRoute[] = [
   "puter",
   "vercel-gateway",
   "gemini",
+  "nvidia",
   "llmapi",
-  "laya",
 ];
 
 export interface CallRouterOptions {
@@ -45,8 +45,8 @@ export interface CallRouterOptions {
   spaceBunny?: SpaceBunnyClientOptions;
   vercelGateway?: VercelGatewayClientOptions;
   gemini?: GeminiClientOptions;
+  nvidia?: NvidiaClientOptions;
   llmapi?: LlmapiClientOptions;
-  laya?: LayaClientOptions;
   /** Used when a call does not name a route. Defaults to `DEFAULT_CALL_ORDER`. */
   order?: CallRoute[];
 }
@@ -75,8 +75,8 @@ export function createCallRouter(options: CallRouterOptions = {}): CallRouter {
   if (options.spaceBunny) clients["space-bunny"] = createSpaceBunnyClient(options.spaceBunny);
   if (options.vercelGateway) clients["vercel-gateway"] = createVercelGatewayClient(options.vercelGateway);
   if (options.gemini) clients.gemini = createGeminiClient(options.gemini);
+  if (options.nvidia) clients.nvidia = createNvidiaClient(options.nvidia);
   if (options.llmapi) clients.llmapi = createLlmapiClient(options.llmapi);
-  if (options.laya) clients.laya = createLayaClient(options.laya);
 
   const defaultOrder = (options.order ?? DEFAULT_CALL_ORDER).filter((id) => clients[id]);
 

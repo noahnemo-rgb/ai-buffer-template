@@ -29,6 +29,7 @@ export async function clientForSavedProvider(probe: ProviderProbe) {
     spaceBunny: { getApiKey: () => SecureStore.getItemAsync("ai-buffer.openrouter_key"), transport: "xhr" },
     vercelGateway: { getApiKey: () => SecureStore.getItemAsync("ai-buffer.gateway_key"), transport: "xhr" },
     gemini: { getApiKey: () => SecureStore.getItemAsync("ai-buffer.gemini_key"), transport: "xhr" },
+    nvidia: { getApiKey: () => SecureStore.getItemAsync("ai-buffer.nvidia_key"), transport: "xhr" },
     llmapi: { getApiKey: () => SecureStore.getItemAsync("ai-buffer.llmapi_key"), transport: "xhr" },
   });
 }

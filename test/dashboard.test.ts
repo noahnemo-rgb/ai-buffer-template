@@ -16,11 +16,18 @@ import { VERCEL_GATEWAY_URL } from "../src/vercel-gateway.ts";
 describe("provider dashboard", () => {
   it("lists every provider with the allowed status words and persists the choice", async () => {
     const selection = createProviderSelectionStore(createMemoryStore());
-    const probe = { puterSignedIn: true, openrouterKey: false, gatewayKey: true, geminiKey: false, llmapiKey: true };
+    const probe = {
+      puterSignedIn: true,
+      openrouterKey: false,
+      gatewayKey: true,
+      geminiKey: false,
+      nvidiaKey: true,
+      llmapiKey: true,
+    };
     let rows = await loadDashboard(selection, probe);
     assert.deepEqual(
       rows.map((row) => row.label),
-      ["Puter", "OpenRouter", "Space Bunny Alpha", "Vercel Gateway", "Gemini API", "Laya", "LLMAPI"],
+      ["Puter", "OpenRouter", "Space Bunny Alpha", "Vercel Gateway", "Gemini API", "NVIDIA NIM", "LLMAPI"],
     );
     assert.deepEqual(
       rows.map((row) => row.status),
@@ -30,7 +37,7 @@ describe("provider dashboard", () => {
         DASHBOARD_LABELS.notConfigured,
         DASHBOARD_LABELS.configured,
         DASHBOARD_LABELS.notConfigured,
-        DASHBOARD_LABELS.notConfigured,
+        DASHBOARD_LABELS.configured,
         DASHBOARD_LABELS.configured,
       ],
     );
