@@ -8,6 +8,7 @@ import urllib.request
 from collections.abc import Callable, Iterator
 from typing import Any
 
+from .redact import redact_secrets
 from .sse import drain_openrouter_sse
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -74,4 +75,5 @@ def stream_openrouter(
                     yield text
     except urllib.error.HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OpenRouter HTTP {error.code}: {body[:300]}") from error
+        safe = redact_secrets(body)[:300]
+        raise RuntimeError(f"OpenRouter HTTP {error.code}: {safe}") from error

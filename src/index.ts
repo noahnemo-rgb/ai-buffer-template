@@ -28,7 +28,7 @@ export {
   loadDashboard,
 } from "./dashboard.js";
 export type { DashboardRow, ProviderProbe, ProviderSelection, ProviderSelectionStore } from "./dashboard.js";
-export { AiBufferError, asAiError, codeFor, formatAiError } from "./errors.js";
+export { AiBufferError, asAiError, codeFor, formatAiError, providerHttpError } from "./errors.js";
 export type { AiErrorCode } from "./errors.js";
 export { DEFAULT_GEMINI_MODEL, GEMINI_API_BASE, geminiStreamUrl, readGeminiApiKey } from "./gemini.js";
 export { DEFAULT_NVIDIA_MODEL, NVIDIA_URL, readNvidiaApiKey } from "./nvidia.js";
@@ -54,9 +54,37 @@ export {
 } from "./space-bunny.js";
 export type { SpaceBunnyReasoningEffort } from "./space-bunny.js";
 export { OPENROUTER_URL, streamOpenRouter } from "./openrouter.js";
+export {
+  createAiProxy,
+  createMemoryRateLimit,
+  createNodeAiProxy,
+  createNodeVaultHandler,
+  createVaultHandler,
+  readOwnerApiKey,
+  SERVER_PROXY_PROVIDERS,
+} from "./proxy.js";
+export type {
+  AiProxyOptions,
+  NodeRequestLike,
+  NodeResponseLike,
+  ProxyCaller,
+  ServerProxyProvider,
+  VaultHandlerOptions,
+} from "./proxy.js";
+export { looksLikeSecret, maskKeyHint, redactSecrets } from "./redact.js";
 export { drainOpenRouterSse } from "./sse.js";
-export { createLocalStorageStore, createMemoryStore, createOpenRouterKeyStore } from "./store.js";
-export type { OpenRouterKeyStore } from "./store.js";
+export {
+  createLocalStorageStore,
+  createMemoryKeyStore,
+  createMemoryStore,
+  createOpenRouterKeyStore,
+  createProviderKeyStore,
+  isWebDurableStore,
+  PROVIDER_KEY_NAMES,
+} from "./store.js";
+export type { KeyedProviderId, OpenRouterKeyStore, ProviderKeyStore } from "./store.js";
+export { createKeyVault, createMemoryVaultStorage, vaultKeyFromString } from "./vault.js";
+export type { KeyVault, VaultStatus, VaultStorage } from "./vault.js";
 export type {
   AiClient,
   AiProviderInfo,

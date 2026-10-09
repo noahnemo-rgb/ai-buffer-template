@@ -4,4 +4,9 @@ dist/
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
 .DS_Store

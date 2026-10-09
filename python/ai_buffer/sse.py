@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .redact import redact_secrets
+
 
 def drain_openrouter_sse(full_text: str, parsed_through: int, provider_name: str = "OpenRouter") -> tuple[str, int]:
     """Return (new_text, new_parsed_through) for complete lines in full_text."""
@@ -34,7 +36,7 @@ def drain_openrouter_sse(full_text: str, parsed_through: int, provider_name: str
                 message = error.get("message") or f"{provider_name} stream error"
             else:
                 message = f"{provider_name} stream error"
-            raise RuntimeError(str(message))
+            raise RuntimeError(redact_secrets(str(message)))
         choices = chunk.get("choices") or []
         if not choices:
             continue

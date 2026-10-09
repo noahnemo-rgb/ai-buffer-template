@@ -1,4 +1,5 @@
 import { AiBufferError } from "./errors.js";
+import { redactSecrets } from "./redact.js";
 import type { ChatMessage } from "./types.js";
 import type { SseDelta } from "./sse.js";
 
@@ -77,7 +78,7 @@ export function drainGeminiSse(fullText: string, parsedThrough: number): SseDelt
     }
     if (chunk.error) {
       const message = typeof chunk.error === "string" ? chunk.error : chunk.error.message;
-      throw new Error(message || "Gemini API stream error");
+      throw new Error(redactSecrets(message || "Gemini API stream error"));
     }
     const parts = chunk.candidates?.[0]?.content?.parts ?? [];
     for (const part of parts) {

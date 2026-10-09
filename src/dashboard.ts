@@ -1,5 +1,6 @@
 import { createAiClient, type AiClientOptions } from "./client.js";
 import { AiBufferError } from "./errors.js";
+import { looksLikeSecret, maskKeyHint } from "./redact.js";
 import { createCallRouter, DEFAULT_CALL_ORDER, type CallRouter, type CallRouterOptions } from "./router.js";
 import { defaultModelFor, isAiProviderId, PROVIDER_CATALOG, type AiProviderId } from "./providers.js";
 import type { AiClient, SecretStore } from "./types.js";
@@ -25,6 +26,11 @@ export interface ProviderProbe {
   nvidiaKey?: boolean;
   /** `LLM_API_KEY` is available. */
   llmapiKey?: boolean;
+  /**
+   * Last 4 characters of a key, or a longer value that will be reduced to those 4.
+   * The row shows `••••` plus those characters. The full key is not copied onto the row.
+   */
+  keyHints?: Partial<Record<AiProviderId, string>>;
 }
 
 export interface DashboardRow {
@@ -36,6 +42,8 @@ export interface DashboardRow {
   activeLabel: "" | typeof DASHBOARD_LABELS.active;
   modelLabel: typeof DASHBOARD_LABELS.model;
   model: string;
+  /** Masked key (`••••` plus 4 characters), or `""` when the probe has no hint. */
+  keyHint: string;
 }
 
 export interface ProviderSelection {
@@ -71,7 +79,8 @@ export function createProviderSelectionStore(store: SecretStore): ProviderSelect
     setProvider: (id) => Promise.resolve(store.set(PROVIDER_KEY, id)),
     getModel: async (id) => {
       const value = (await store.get(modelKey(id)))?.trim();
-      return value || defaultModelFor(id);
+      if (!value || looksLikeSecret(value)) return defaultModelFor(id);
+      return value;
     },
     setModel: async (id, value) => {
       const trimmed = value.trim();
@@ -79,12 +88,16 @@ export function createProviderSelectionStore(store: SecretStore): ProviderSelect
         await store.delete(modelKey(id));
         return;
       }
+      if (looksLikeSecret(trimmed)) {
+        throw new AiBufferError("provider_error", "The model field cannot store an API key.");
+      }
       await store.set(modelKey(id), trimmed);
     },
     getSelection: async () => {
       const provider = (await store.get(PROVIDER_KEY))?.trim() ?? "";
       if (!isAiProviderId(provider)) return null;
-      const model = (await store.get(modelKey(provider)))?.trim() || defaultModelFor(provider);
+      const stored = (await store.get(modelKey(provider)))?.trim() ?? "";
+      const model = stored && !looksLikeSecret(stored) ? stored : defaultModelFor(provider);
       return { provider, model };
     },
   };
@@ -125,6 +138,7 @@ export async function loadDashboard(store: ProviderSelectionStore, probe: Provid
       activeLabel: active === item.id ? DASHBOARD_LABELS.active : "",
       modelLabel: DASHBOARD_LABELS.model,
       model: await store.getModel(item.id),
+      keyHint: maskKeyHint(probe.keyHints?.[item.id] ?? ""),
     });
   }
   return rows;
