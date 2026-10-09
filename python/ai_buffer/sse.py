@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 
-def drain_openrouter_sse(full_text: str, parsed_through: int) -> tuple[str, int]:
+def drain_openrouter_sse(full_text: str, parsed_through: int, provider_name: str = "OpenRouter") -> tuple[str, int]:
     """Return (new_text, new_parsed_through) for complete lines in full_text."""
     text = ""
     slice_text = full_text[parsed_through:]
@@ -31,9 +31,9 @@ def drain_openrouter_sse(full_text: str, parsed_through: int) -> tuple[str, int]
             if isinstance(error, str):
                 message = error
             elif isinstance(error, dict):
-                message = error.get("message") or "OpenRouter stream error"
+                message = error.get("message") or f"{provider_name} stream error"
             else:
-                message = "OpenRouter stream error"
+                message = f"{provider_name} stream error"
             raise RuntimeError(str(message))
         choices = chunk.get("choices") or []
         if not choices:

@@ -19,7 +19,11 @@ export class AiBufferError extends Error {
 }
 
 export function openRouterHttpError(status: number, body: string): Error {
-  const error = new Error(`OpenRouter HTTP ${status}: ${body.slice(0, 300)}`) as Error & { status: number };
+  return providerHttpError("OpenRouter", status, body);
+}
+
+export function providerHttpError(provider: string, status: number, body: string): Error {
+  const error = new Error(`${provider} HTTP ${status}: ${body.slice(0, 300)}`) as Error & { status: number };
   error.status = status;
   return error;
 }

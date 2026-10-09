@@ -13,7 +13,7 @@ interface OpenRouterChunk {
  * `parsedThrough` is the index already consumed. Pass the same growing string
  * on every chunk.
  */
-export function drainOpenRouterSse(fullText: string, parsedThrough: number): SseDelta {
+export function drainOpenRouterSse(fullText: string, parsedThrough: number, providerName = "OpenRouter"): SseDelta {
   let text = "";
   const slice = fullText.slice(parsedThrough);
   const lines = slice.split("\n");
@@ -37,7 +37,7 @@ export function drainOpenRouterSse(fullText: string, parsedThrough: number): Sse
     }
     if (chunk.error) {
       const message = typeof chunk.error === "string" ? chunk.error : chunk.error.message;
-      throw new Error(message || "OpenRouter stream error");
+      throw new Error(message || `${providerName} stream error`);
     }
     const content = chunk.choices?.[0]?.delta?.content;
     if (content) text += content;
@@ -45,9 +45,10 @@ export function drainOpenRouterSse(fullText: string, parsedThrough: number): Sse
   return { text, parsedThrough: consumed };
 }
 
-export async function readOpenRouterSse(
+export async function readSse(
   body: ReadableStream<Uint8Array>,
   onDelta: (text: string) => void,
+  drain: (fullText: string, parsedThrough: number) => SseDelta,
 ): Promise<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -56,7 +57,7 @@ export async function readOpenRouterSse(
   let full = "";
   const take = (flush: boolean) => {
     const source = flush && buffered.length > 0 && !buffered.endsWith("\n") ? `${buffered}\n` : buffered;
-    const drained = drainOpenRouterSse(source, parsedThrough);
+    const drained = drain(source, parsedThrough);
     parsedThrough = drained.parsedThrough;
     if (flush) buffered = source;
     if (drained.text) {
@@ -73,4 +74,11 @@ export async function readOpenRouterSse(
   buffered += decoder.decode();
   take(true);
   return full;
+}
+
+export async function readOpenRouterSse(
+  body: ReadableStream<Uint8Array>,
+  onDelta: (text: string) => void,
+): Promise<string> {
+  return readSse(body, onDelta, drainOpenRouterSse);
 }

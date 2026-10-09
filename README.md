@@ -1,6 +1,6 @@
 # ai-buffer
 
-A small shared adapter for **Puter**, **OpenRouter**, and **Space Bunny Alpha**. Each app keeps its own instructions. This package only sends the chat and streams the reply back.
+A small shared adapter for **Puter**, **OpenRouter**, **Space Bunny Alpha**, **Vercel Gateway**, **Gemini API**, **NVIDIA NIM**, and **LLMAPI**. Each app keeps its own instructions. This package only sends the chat and streams the reply back.
 
 Your phone app, your website, and your Python API can all call the same kind of function. The provider changes. The call does not.
 
@@ -10,6 +10,10 @@ Your phone app, your website, and your Python API can all call the same kind of 
 | iPhone or Android | The person who saved an OpenRouter key on the device | `provider: "openrouter"` and `transport: "xhr"` |
 | A server you run | You, with `OPENROUTER_API_KEY` | `provider: "openrouter"` |
 | Any of those, when you ask for it | The same OpenRouter key | `provider: "space-bunny"` |
+| A server you run, or a phone | The AI Gateway account for `AI_GATEWAY_API_KEY`, or the Vercel project for `VERCEL_OIDC_TOKEN` | `provider: "vercel-gateway"` |
+| A server you run, or a phone | The Google project for `GEMINI_API_KEY` | `provider: "gemini"` |
+| A server you run, or a phone | The LLMAPI account for `LLM_API_KEY` | `provider: "llmapi"` |
+| A server you run, or a phone | The NVIDIA account for `NVIDIA_API_KEY` | `provider: "nvidia"` |
 
 Puter sign-in happens in the browser. A phone and a Python server use OpenRouter instead. The adapter hides that split.
 
@@ -75,6 +79,8 @@ A full screen sketch is in `examples/expo-app.ts`.
 ## Where the key lives
 
 Put an OpenRouter key in the phone's secure store, or in the server environment as `OPENROUTER_API_KEY`. A website should use Puter, or it should call your server. A key placed in the website's JavaScript can be copied by anyone who opens the page.
+
+`AI_GATEWAY_API_KEY`, `VERCEL_OIDC_TOKEN`, `GEMINI_API_KEY`, `NVIDIA_API_KEY`, and `LLM_API_KEY` follow the same rule. Keep them in the server environment or in device secure storage.
 
 ## Errors the screen can branch on
 
@@ -173,6 +179,105 @@ for chunk in stream_space_bunny(api_key=os.environ["OPENROUTER_API_KEY"], messag
     print(chunk, end="", flush=True)
 ```
 
+## Vercel Gateway
+
+Vercel AI Gateway exposes an OpenAI-compatible chat completions endpoint. The URL is `https://ai-gateway.vercel.sh/v1/chat/completions`. Send `Authorization: Bearer` with `AI_GATEWAY_API_KEY`. If that variable is empty, the adapter sends `VERCEL_OIDC_TOKEN` instead. A non-empty API key is used even when the OIDC token is also set. Model ids look like `provider/model` and come from `GET https://ai-gateway.vercel.sh/v1/models`. The default in this package is `openai/gpt-4o-mini`, which was in that list on 2026-10-09. Streaming is Server-Sent Events: `data:` JSON with `choices[0].delta.content`, then `data: [DONE]`.
+
+Docs: [OpenAI Chat Completions](https://vercel.com/docs/ai-gateway/sdks-and-apis/openai-chat-completions), [streaming](https://vercel.com/docs/ai-gateway/sdks-and-apis/openai-chat-completions/streaming), [authentication](https://vercel.com/docs/ai-gateway/authentication-and-byok).
+
+```ts
+import { createAiClient, readGatewayApiKey } from "ai-buffer";
+
+const ai = createAiClient({
+  provider: "vercel-gateway",
+  getApiKey: () => readGatewayApiKey(process.env),
+  model: process.env.AI_GATEWAY_MODEL,
+  appName: "My Server App",
+});
+```
+
+On a phone, pass `transport: "xhr"` so tokens show up as they arrive. Python:
+
+```python
+from ai_buffer import stream_vercel_gateway
+
+for chunk in stream_vercel_gateway(api_key=os.environ["AI_GATEWAY_API_KEY"], messages=messages):
+    print(chunk, end="", flush=True)
+```
+
+## Gemini API
+
+The Gemini API streams from `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse`. The key is the `x-goog-api-key` header, from `GEMINI_API_KEY`. It is not placed in the URL. The model id is the model name, such as `gemini-3.8-flash` (the id in the text-generation docs checked on 2026-10-09). A system message is sent as `systemInstruction`. Assistant turns are sent as role `model`. Each SSE `data:` payload is a `GenerateContentResponse`. Text is read from `candidates[0].content.parts[].text`. Parts marked `thought` are skipped. HTTP 429 is `rate_limited`. HTTP 402 is `payment_required`.
+
+Docs: [text generation](https://ai.google.dev/gemini-api/docs/generate-content/text-generation), [streamGenerateContent](https://ai.google.dev/api/generate-content), [API keys](https://ai.google.dev/gemini-api/docs/api-key), [errors](https://ai.google.dev/gemini-api/docs/generate-content/api-errors). Google’s current docs also describe an Interactions API as the interface for new projects. This adapter calls `streamGenerateContent` because that method streams a chat with history.
+
+```ts
+import { createAiClient, readGeminiApiKey } from "ai-buffer";
+
+const ai = createAiClient({
+  provider: "gemini",
+  getApiKey: () => readGeminiApiKey(process.env),
+  model: process.env.GEMINI_MODEL,
+});
+```
+
+On a phone, pass `transport: "xhr"`. Python:
+
+```python
+from ai_buffer import stream_gemini
+
+for chunk in stream_gemini(api_key=os.environ["GEMINI_API_KEY"], messages=messages):
+    print(chunk, end="", flush=True)
+```
+
+## LLMAPI
+
+LLMAPI at [docs.llmapi.ai](https://docs.llmapi.ai/) documents `POST https://api.llmapi.ai/v1/chat/completions` with `Authorization: Bearer $LLM_API_KEY`. The body is OpenAI chat completions, including `stream: true`. The sample model id on that page is `gpt-4o`. A different site, [llmapi.pro](https://llmapi.pro/docs), documents `https://llmapi.pro/v1/chat/completions`. This package calls `api.llmapi.ai` unless you pass `url`.
+
+```ts
+import { createAiClient, readLlmapiApiKey } from "ai-buffer";
+
+const ai = createAiClient({
+  provider: "llmapi",
+  getApiKey: () => readLlmapiApiKey(process.env),
+  model: process.env.LLMAPI_MODEL,
+});
+```
+
+On a phone, pass `transport: "xhr"`. Python:
+
+```python
+from ai_buffer import stream_llmapi
+
+for chunk in stream_llmapi(api_key=os.environ["LLM_API_KEY"], messages=messages):
+    print(chunk, end="", flush=True)
+```
+
+## NVIDIA NIM
+
+NVIDIA NIM serves Nemotron and other catalog models through one OpenAI-compatible chat completions endpoint. The URL is `https://integrate.api.nvidia.com/v1/chat/completions`. Send `Authorization: Bearer` with `NVIDIA_API_KEY`. Model ids look like `nvidia/nemotron-3-nano-30b-a3b`. That id is the default here. It was listed under NVIDIA on the LLM APIs page on 2026-10-09. Streaming is Server-Sent Events: `data:` JSON with `choices[0].delta.content`, then `data: [DONE]`.
+
+Docs: [LLM APIs](https://docs.api.nvidia.com/nim/reference/llm-apis), [catalog auth](https://build.nvidia.com/llms.txt), [Nemotron 3 Nano](https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3-nano-30b-a3b-infer).
+
+```ts
+import { createAiClient, readNvidiaApiKey } from "ai-buffer";
+
+const ai = createAiClient({
+  provider: "nvidia",
+  getApiKey: () => readNvidiaApiKey(process.env),
+  model: process.env.NVIDIA_MODEL,
+});
+```
+
+On a phone, pass `transport: "xhr"`. Python:
+
+```python
+from ai_buffer import stream_nvidia
+
+for chunk in stream_nvidia(api_key=os.environ["NVIDIA_API_KEY"], messages=messages):
+    print(chunk, end="", flush=True)
+```
+
 ## Python / FastAPI
 
 ```python
@@ -197,6 +302,51 @@ for chunk in stream_openrouter(
 
 `examples/fastapi_route.py` shows the same helper behind a streaming route.
 
+`stream_vercel_gateway`, `stream_gemini`, `stream_nvidia`, and `stream_llmapi` are the same kind of helper for the other hosts.
+
+## Provider dashboard
+
+There is no connections-connector screen in this repo. ONE-SeedFeast has an `/assist` screen and `CONNECTION_LABELS` for Puter, Space Bunny Alpha, and OpenRouter. ONE-Syntax-IDE has an AI settings modal for Puter sign-in and an OpenRouter key. Neither is a reusable provider list, so the list lives here.
+
+`createProviderSelectionStore` saves the active provider and each provider's model in the store you pass. It does not save API keys. `loadDashboard` returns one row per provider. `createClientFromSelection` and `createRouterFromSelection` pass that choice to `createAiClient` and `createCallRouter`. Space Bunny Alpha keeps the model id `stealth/space-bunny-alpha`.
+
+```ts
+import {
+  createMemoryStore,
+  createProviderSelectionStore,
+  createClientFromSelection,
+  loadDashboard,
+  readGatewayApiKey,
+} from "ai-buffer";
+
+const selection = createProviderSelectionStore(createMemoryStore());
+const rows = await loadDashboard(selection, {
+  puterSignedIn: false,
+  openrouterKey: Boolean(process.env.OPENROUTER_API_KEY),
+  gatewayKey: Boolean(readGatewayApiKey(process.env)),
+  geminiKey: Boolean(process.env.GEMINI_API_KEY),
+  nvidiaKey: Boolean(process.env.NVIDIA_API_KEY),
+  llmapiKey: Boolean(process.env.LLM_API_KEY),
+});
+const chosen = await selection.getSelection();
+if (chosen) {
+  const ai = createClientFromSelection(chosen, {
+    vercelGateway: { getApiKey: () => readGatewayApiKey(process.env) },
+  });
+}
+```
+
+The rows use the provider names and the words `model`, `active`, `configured`, and `not configured`.
+
+Build the package, then serve the repo and open the example:
+
+```bash
+npm run build
+python3 -m http.server 8765
+```
+
+Open `http://127.0.0.1:8765/examples/dashboard.html`. The page reads `localStorage`. The sample probe marks Puter and Vercel Gateway as configured. `examples/expo-dashboard.ts` is the phone sketch: the same store, backed by `expo-secure-store`.
+
 ## What each app still owns
 
 This package does not add a chat window by itself. The app still has to:
@@ -206,7 +356,7 @@ This package does not add a chat window by itself. The app still has to:
 3. Show `onChunk` on the screen.
 4. Branch on `error.code` for sign-in, a missing key, or a wait message.
 
-`getInfo()` tells the screen whether Puter is signed in or an OpenRouter key is saved.
+`getInfo()` tells the screen whether Puter is signed in or an OpenRouter key is saved. The same call reports a Vercel Gateway key, a Gemini API key, an NVIDIA API key, or an LLMAPI key.
 
 ## Model names
 

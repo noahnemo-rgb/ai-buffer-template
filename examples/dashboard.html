@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ai-buffer</title>
+    <style>
+      body {
+        font: 16px/1.4 system-ui, sans-serif;
+        margin: 24px;
+        color: #17202a;
+        background: #f6f8fa;
+      }
+      ul {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        max-width: 720px;
+      }
+      li {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px 16px;
+        align-items: center;
+        background: #fff;
+        border: 1px solid #d5dde5;
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin: 0 0 8px;
+      }
+      li[data-active="true"] {
+        border-color: #1f6feb;
+      }
+      button {
+        flex: 1 1 180px;
+        font: inherit;
+        background: transparent;
+        border: 0;
+        padding: 0;
+        text-align: left;
+        cursor: pointer;
+      }
+      label {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      input {
+        font: inherit;
+        width: 220px;
+        border: 1px solid #d5dde5;
+        border-radius: 6px;
+        padding: 4px 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <ul id="providers"></ul>
+    <!-- Sample probe for this page. Apps replace it with their own key and sign-in checks. -->
+    <script type="module">
+      import {
+        createLocalStorageStore,
+        createProviderSelectionStore,
+        loadDashboard,
+      } from "../dist/index.js";
+
+      const store = createProviderSelectionStore(createLocalStorageStore());
+      const probe = {
+        puterSignedIn: true,
+        openrouterKey: false,
+        gatewayKey: true,
+        geminiKey: false,
+        nvidiaKey: false,
+        llmapiKey: false,
+      };
+      const list = document.querySelector("#providers");
+
+      async function draw() {
+        const rows = await loadDashboard(store, probe);
+        list.replaceChildren();
+        for (const row of rows) {
+          const item = document.createElement("li");
+          item.dataset.active = row.activeLabel ? "true" : "false";
+
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = row.label;
+          button.addEventListener("click", async () => {
+            await store.setProvider(row.id);
+            await draw();
+          });
+
+          const status = document.createElement("span");
+          status.textContent = row.status;
+
+          const active = document.createElement("span");
+          active.textContent = row.activeLabel;
+
+          const label = document.createElement("label");
+          const modelName = document.createElement("span");
+          modelName.textContent = row.modelLabel;
+          const input = document.createElement("input");
+          input.value = row.model;
+          input.addEventListener("change", async () => {
+            await store.setModel(row.id, input.value);
+            await draw();
+          });
+          label.append(modelName, input);
+          item.append(button, status, active, label);
+          list.append(item);
+        }
+      }
+
+      await draw();
+    </script>
+  </body>
+</html>
